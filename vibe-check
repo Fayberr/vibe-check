@@ -308,6 +308,32 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                 warnings.append(Finding('em-dashes', 'warn',
                     "Auto-fixed em-dashes by replacing with commas.", fixable=True))
 
+    # Check 1b: Double hyphens used as em-dash replacement (-- in prose)
+    # Pattern: word, space(s), --, space(s), word — the classic AI slop
+    # "like this -- it means" but NOT "--fix", "i--", "<!--", "-->", "----"
+    dd_matches = list(re.finditer(r'\w\s+--\s+\w', content))
+    if dd_matches:
+        # Filter out false positives: HTML comments, CLI flags, decrement
+        real = []
+        for m in dd_matches:
+            ctx = content[max(0, m.start()-2):m.end()+2]
+            if '<!--' in ctx or '-->' in ctx:
+                continue
+            real.append(m)
+        if real:
+            sev = _sev('double-dash', 'error')
+            if sev != 'off':
+                (errors if sev == 'error' else warnings).append(
+                    Finding('double-dash', sev,
+                        f"Found {len(real)} double hyphen(s) ('--') used as dash in prose. "
+                        f"Replace with comma or single '-'.", fixable=True)
+                )
+                if fix:
+                    content = re.sub(r'(\w)\s+--\s+(\w)', r'\1, \2', content)
+                    file_path.write_text(content, encoding="utf-8")
+                    warnings.append(Finding('double-dash', 'warn',
+                        "Auto-fixed double hyphens by replacing with commas.", fixable=True))
+
     # Check 2: Hardcoded vercel.app URLs
     if "vercel.app" in content and not file_path.name.endswith(".md"):
         sev = _sev('vercel-urls', 'error')
