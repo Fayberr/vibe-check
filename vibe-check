@@ -48,6 +48,48 @@ TEXT_EXTENSIONS = {
 # for every route file in the same project.
 _seen_project_warnings = set()
 
+# ── Git commit-msg hook (installed by --install-hooks) ──────────────────────
+# Embedded as a constant so vibe-check stays single-file. This hook blocks
+# AI co-author trailers before they land in git history, closing the gap
+# between after-the-fact detection (Rule 51) and actual prevention.
+_COMMIT_MSG_HOOK = r"""#!/bin/sh
+# Installed by vibe-check --install-hooks
+# Prevents AI co-author trailers from entering git history.
+#
+# AI tools (Claude, GPT, Gemini, etc.) are tools, not co-authors.
+# A "Co-Authored-By: Claude" trailer is a dead giveaway of vibecoded code.
+# This hook blocks those commits before they happen — GitHub contributor
+# caching makes retroactive cleanup much harder than upfront prevention.
+#
+# Emergency bypass: git commit --no-verify
+# To uninstall: rm .git/hooks/commit-msg
+
+COMMIT_MSG_FILE="$1"
+
+if [ ! -f "$COMMIT_MSG_FILE" ]; then
+    exit 0
+fi
+
+if grep -qiE '^Co-Authored-By:.*(Claude|Anthropic|GPT|ChatGPT|Gemini|Copilot|Codex)' "$COMMIT_MSG_FILE"; then
+    cat >&2 << 'EOF'
+╔══════════════════════════════════════════════════════════════╗
+║  ❌ Commit rejected: AI co-author trailer detected          ║
+║                                                             ║
+║  Your commit message includes a "Co-Authored-By:" line      ║
+║  referencing an AI tool (Claude, GPT, Gemini, etc.).        ║
+║                                                             ║
+║  AI tools are tools, not co-authors. Remove the line.       ║
+║                                                             ║
+║  Emergency bypass (use sparingly):                          ║
+║    git commit --no-verify                                   ║
+║                                                             ║
+║  Hook installed by vibe-check. Run again to update.         ║
+╚══════════════════════════════════════════════════════════════╝
+EOF
+    exit 1
+fi
+"""
+
 
 def _load_config(target_dir):
     """Load .vibecheckrc (JSON) from target_dir if it exists.
@@ -1362,6 +1404,70 @@ def scan_directory(target_dir: Path, is_prod: bool = False, fix: bool = False,
         print(f"{GREEN}{BOLD}PASSED:{RESET} 100% Clean! Zero anti-slop red flags found.\n")
         sys.exit(0)
 
+def install_hooks(target_dir, global_hooks=False):
+    """Install git hooks that prevent AI co-author trailers from being committed.
+
+    Without --global: installs a commit-msg hook in target_dir/.git/hooks/
+    With --global: sets up a global git hooks directory via core.hooksPath.
+
+    Returns True if hooks were installed/updated, False on error.
+    """
+    hook_path = None
+
+    if global_hooks:
+        hooks_dir = Path.home() / ".config" / "git" / "hooks"
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        hook_path = hooks_dir / "commit-msg"
+        try:
+            subprocess.run(
+                ["git", "config", "--global", "core.hooksPath", str(hooks_dir)],
+                capture_output=True, text=True, timeout=10,
+            )
+            print(f"{GREEN}✔{RESET} Global git hooks directory set to: {hooks_dir}")
+        except Exception as exc:
+            print(f"{RED}✖{RESET} Could not set global core.hooksPath: {exc}")
+            return False
+    else:
+        git_dir = target_dir / ".git"
+        if not git_dir.is_dir():
+            # Check if this is a worktree (the .git is a file pointing to the real dir)
+            try:
+                result = subprocess.run(
+                    ["git", "rev-parse", "--git-dir"],
+                    capture_output=True, text=True, cwd=str(target_dir), timeout=10,
+                )
+                git_dir = Path(result.stdout.strip())
+            except Exception:
+                pass
+            if not git_dir.is_dir():
+                print(f"{RED}✖{RESET} Not a git repository (or .git not found). Run inside a git repo.")
+                return False
+        hooks_dir = git_dir / "hooks"
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        hook_path = hooks_dir / "commit-msg"
+
+    # Check if an existing hook is one of ours
+    if hook_path.exists():
+        existing = hook_path.read_text(encoding="utf-8", errors="replace")
+        if "Installed by vibe-check" in existing:
+            # Our hook already — overwrite to update
+            pass
+        else:
+            # Someone else's hook — back it up
+            backup = Path(str(hook_path) + ".bak")
+            backup.write_text(existing, encoding="utf-8")
+            print(f"  {YELLOW}⚠{RESET}  Existing commit-msg hook backed up to {backup.name}")
+
+    hook_path.write_text(_COMMIT_MSG_HOOK, encoding="utf-8")
+    hook_path.chmod(0o755)
+
+    scope = "Global" if global_hooks else "Repository"
+    print(f"{GREEN}✔{RESET} {scope} commit-msg hook installed: {hook_path}")
+    print(f"  AI co-author trailers (Claude, GPT, Gemini, Copilot, Codex)")
+    print(f"  will now be blocked at commit time.")
+    print(f"  Emergency bypass: git commit --no-verify")
+    return True
+
 def main():
     parser = argparse.ArgumentParser(description="Vibe-Check: Automated anti-vibecoding and anti-slop linter.")
     parser.add_argument("path", nargs="?", default=".", help="Path to project directory or file (default: current directory)")
@@ -1369,9 +1475,16 @@ def main():
     parser.add_argument("--fix", action="store_true", help="Automatically fix fixable errors (e.g. replace em-dashes with standard dashes)")
     parser.add_argument("--changed", action="store_true", help="Only scan files changed in git (vs HEAD). Falls back to full scan outside repos.")
     parser.add_argument("--no-cache", action="store_true", help="Disable file-hash caching (always re-scan every file)")
+    parser.add_argument("--install-hooks", action="store_true", help="Install git commit-msg hook to block AI co-author trailers at commit time")
+    parser.add_argument("--global", action="store_true", dest="global_hooks", help="With --install-hooks: install hooks globally (all repos)")
 
     args = parser.parse_args()
     target_path = Path(args.path)
+
+    if args.install_hooks:
+        if not install_hooks(target_path, global_hooks=args.global_hooks):
+            sys.exit(1)
+        return  # hooks installed, don't scan
 
     if not target_path.exists():
         print(f"{RED}Error:{RESET} Target path '{target_path}' does not exist.")
