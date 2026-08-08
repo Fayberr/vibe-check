@@ -65,6 +65,7 @@ cd vibe-check
 
 ### Copywriting & Social Proof Red Flags (Rules 12-19)
 - **Em-dashes** (U+2014) in UI copy: replace with commas (auto-fixable)
+- **Double hyphens** (`--`) used as prose dash: replace with comma (auto-fixable)
 - Vague buzzword hero headlines
 - Fake testimonials ("John Doe", "Jane Smith")
 - Fake live visitor badges
@@ -235,8 +236,8 @@ Once installed, any `git commit` with a `Co-Authored-By:` trailer referencing an
 ```yaml
 - name: Run vibe-check
   run: |
-    curl -O https://raw.githubusercontent.com/Fayberr/vibe-check/main/vibe-check
-    python3 vibe-check . --prod
+    pip install vibe-linter
+    vibe-check . --prod
 ```
 
 ### pre-commit
@@ -253,7 +254,7 @@ repos:
 
 vibe-check is intentionally a **single file with zero dependencies**. This means:
 
-- No `pip install`, no `npm install`, no venv setup
+- Single `pip install` (or zero-dependency single file), no venv setup
 - Works on any machine with Python 3.9+
 - Runs in environments where package installs are blocked (CI, corporate)
 - Can be vendored directly into any project
