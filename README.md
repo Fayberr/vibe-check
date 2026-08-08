@@ -139,6 +139,38 @@ FAILED: 3 error(s), 3 warning(s) found.
 | `--no-cache` | Disable file-hash caching (always re-scan) |
 | `--install-hooks` | Install git commit-msg hook to block AI co-author trailers |
 | `--install-hooks --global` | Install the commit-msg hook globally (all repos) |
+| `--json` | Output findings as machine-readable JSON (for AI agent consumption) |
+| `--quiet` | Suppress human-readable output (use with `--json` for clean machine output) |
+
+### Machine-Readable Output (`--json`)
+
+When `--json` is passed, vibe-check outputs a structured JSON object instead of human-readable text. This is designed for AI agent consumption and CI pipelines:
+
+```bash
+vibe-check . --json --quiet
+```
+
+```json
+{
+  "status": "failed",
+  "scanned": 43,
+  "errors": 3,
+  "warnings": 5,
+  "findings": [
+    {
+      "rule": "target-blank-noopener",
+      "severity": "error",
+      "message": "Found 1 target=\"_blank\" link(s) without rel=\"noopener noreferrer\" (lines 18).",
+      "line": 18,
+      "file": "src/components/Hero.jsx"
+    }
+  ]
+}
+```
+
+- `status`: `"ok"`, `"warn"` (warnings only), or `"failed"` (errors present)
+- `findings`: array of finding objects, each with `rule`, `severity`, `message`, optional `line`, `file`, and `fixable`
+- Exit code: 0 for ok/warn, 1 for failed
 
 ### Git Hook: Blocking AI Co-Author Trailers
 
