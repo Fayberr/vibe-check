@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""
+Scrub AI co-author/contributor trails from git commit history.
+
+Removes trailers like:
+    Co-Authored-By: Claude <noreply@anthropic.com>
+    Co-authored-by: Claude <noreply@anthropic.com>
+    Co-Authored-By: Claude
+
+from all commits across all branches in the current repo.
+
+Usage:
+    scrub-ai-contributors              # dry-run (show what would change)
+    scrub-ai-contributors --apply      # rewrite history
+
+After --apply, use 'git push --force' to update remotes (with caution).
+"""
+
+import subprocess
+import sys
+import re
+
+AI_TRAILER_RE = re.compile(
+    r'^Co-Authored-By: (?:Claude|Anthropic|GPT|ChatGPT|Gemini|Copilot|Codex).*$',
+    re.IGNORECASE | re.MULTILINE
+)
+
+DRY_RUN = '--apply' not in sys.argv
+
+
+def run(cmd):
+    return subprocess.run(cmd, shell=True, capture_output=True, text=True)
+
+
+def msg_filter(msg):
+    """Remove AI co-author lines from a commit message."""
+    cleaned = AI_TRAILER_RE.sub('', msg)
+    # Remove trailing blank lines left by removal
+    return cleaned.rstrip('\n') + '\n'
+
+
+def main():
+    # Sanity: are we in a git repo?
+    r = run('git rev-parse --show-toplevel')
+    if r.returncode != 0:
+        print('Error: not in a git repository', file=sys.stderr)
+        sys.exit(1)
+
+    root = r.stdout.strip()
+
+    # Count affected commits
+    r = run('git log --all --format="%b"')
+    all_messages = r.stdout
+    matches = AI_TRAILER_RE.findall(all_messages)
+
+    if not matches:
+        print(f'No AI co-author trailers found in {root}')
+        return
+
+    unique = sorted(set(m.strip() for m in matches))
+    total_commits = sum(1 for _ in AI_TRAILER_RE.finditer(all_messages))
+    print(f'Found {total_commits} AI co-author trailer(s) in commits:')
+    for m in unique:
+        print(f'  {m}')
+
+    if DRY_RUN:
+        print('\nDry run. Run with --apply to rewrite history.')
+        print('After --apply: git push --force origin --all  (with caution!)')
+        return
+
+    # Rewrite history
+    sed_script = '/^Co-Authored-By:.*\\(?:Claude\\|Anthropic\\|GPT\\|ChatGPT\\|Gemini\\|Copilot\\|Codex\\).*/Id'
+    r = run(
+        f'git filter-branch -f --msg-filter '
+        f'"sed -e \'{sed_script}\'" '
+        f'-- --all'
+    )
+    if r.returncode != 0:
+        print(f'filter-branch failed:\n{r.stderr}', file=sys.stderr)
+        sys.exit(1)
+
+    # Clean backup refs
+    run('git for-each-ref --format="%(refname)" refs/original/ | xargs -r -n1 git update-ref -d')
+
+    # Verify
+    r = run('git log --all --format="%b"')
+    remaining = len(AI_TRAILER_RE.findall(r.stdout))
+    if remaining:
+        print(f'Warning: {remaining} trailers remain (check old refs)', file=sys.stderr)
+    else:
+        print('All AI co-author trailers removed from history.')
+
+    print('\nNext: git push --force origin --all   (or skip if local-only repo)')
+
+
+if __name__ == '__main__':
+    main()

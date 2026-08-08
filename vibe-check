@@ -5,6 +5,7 @@ import re
 import json
 import hashlib
 import argparse
+import subprocess
 from pathlib import Path
 from html.parser import HTMLParser
 
@@ -1177,7 +1178,6 @@ def scan_directory(target_dir: Path, is_prod: bool = False, fix: bool = False,
     # ── Git-aware file list (--changed) ────────────────────────────────────────
     changed_file_set = None
     if changed_only:
-        import subprocess
         try:
             result = subprocess.run(
                 ["git", "diff", "--name-only", "--diff-filter=ACM", "HEAD"],
@@ -1322,6 +1322,32 @@ def scan_directory(target_dir: Path, is_prod: bool = False, fix: bool = False,
         print(f"\n{BOLD}🔒 Security Checks:{RESET}")
         print(f"  {YELLOW}⚠ [WARN]{RESET}  Project has {len(webhook_files_found)} webhook handler(s) but no HMAC signature verification found anywhere in the project.")
         total_warnings += 1
+
+    # ── Git commit integrity check ───────────────────────────────────────────
+    # AI assistants sneak into commits via Co-Authored-By trailers, which is a
+    # dead giveaway of vibecoded code. Check recent commit messages for
+    # Claude/Anthropic/GPT/Gemini/Copilot/Codex contributor trails.
+    ai_trailer_count = 0
+    try:
+        result = subprocess.run(
+            ["git", "log", "--format=%b", "-50"],
+            capture_output=True, text=True, cwd=str(target_dir), timeout=10,
+        )
+        if result.returncode == 0:
+            ai_pattern = re.compile(
+                r'^Co-Authored-By:.*(?:Claude|Anthropic|GPT|ChatGPT|Gemini|Copilot|Codex)',
+                re.IGNORECASE | re.MULTILINE
+            )
+            ai_matches = ai_pattern.findall(result.stdout)
+            ai_trailer_count = len(ai_matches)
+            if ai_matches:
+                print(f"\n{BOLD}🔒 Security Checks:{RESET}")
+                print(f"  {RED}✖ [ERROR]{RESET} Found {ai_trailer_count} AI co-author trailer(s) in git commit history.")
+                print(f"         Commits include patterns like: {ai_matches[0].strip()}")
+                print(f"         These are an obvious sign of vibecoded code. Run scrub-ai-contributors to remove them.")
+                total_errors += ai_trailer_count
+    except Exception:
+        pass  # Not a git repo or git unavailable — skip
 
     print(f"\n{BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}")
     print(f"Scanned {scanned_files} file(s).")
