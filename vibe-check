@@ -138,6 +138,88 @@ if [ -n "$REPO_GIT_DIR" ]; then
 fi
 """
 
+# ── Git pre-receive hook (installed by --install-hooks --server) ─────────
+# Server-side enforcement: blocks pushes containing AI co-author trailers.
+# Unlike client-side hooks, this CANNOT be bypassed with --no-verify.
+_PRE_RECEIVE_HOOK = r"""#!/bin/bash
+# pre-receive hook: block pushes containing AI co-author trailers.
+# Installed by vibe-check --install-hooks --server
+#
+# This is the SERVER-SIDE enforcement layer. Unlike client-side hooks
+# (commit-msg), this cannot be bypassed with --no-verify. Any push
+# containing a commit with an AI co-author trailer is rejected.
+#
+# Emergency bypass (server admin only):
+#   Set VIBE_CHECK_ALLOW=1 in the server environment.
+#
+# To install across all bare repos on a server:
+#   vibe-check --install-hooks --server /path/to/repos
+
+set -euo pipefail
+
+AI_PATTERN='Co-Authored-By:.*(Claude|Anthropic|GPT|ChatGPT|Gemini|Copilot|Codex)'
+
+if [[ "${VIBE_CHECK_ALLOW:-}" == "1" ]]; then
+    exit 0
+fi
+
+rejected=0
+
+while read -r old_sha new_sha refname; do
+    if [[ "$new_sha" == "0000000000000000000000000000000000000000" ]]; then
+        continue
+    fi
+
+    if [[ "$old_sha" == "0000000000000000000000000000000000000000" ]]; then
+        commits=$(git rev-list "$new_sha" --not --all 2>/dev/null || git rev-list "$new_sha")
+    else
+        commits=$(git rev-list "$old_sha..$new_sha" 2>/dev/null) || commits=""
+    fi
+
+    if [[ -z "$commits" ]]; then
+        continue
+    fi
+
+    while IFS= read -r commit; do
+        if git log -1 --format="%B" "$commit" 2>/dev/null | grep -qiE "$AI_PATTERN"; then
+            found=$(git log -1 --format="%B" "$commit" 2>/dev/null | grep -iE "$AI_PATTERN" | head -1 | xargs)
+            cat >&2 <<EOF
+
+============================================================
+  PUSH REJECTED: AI co-author trailer detected
+============================================================
+
+  Commit: ${commit:0:12}
+  Trailer: $found
+  Ref:     $refname
+
+  AI tools are tools, not co-authors. This commit includes a
+  "Co-Authored-By:" line referencing an AI tool, which is not
+  allowed in this repository.
+
+  To fix:
+    1. Amend the commit message to remove the Co-Authored-By line
+    2. Run: vibe-check --fix      (prevents future occurrences)
+    3. Run: vibe-check --install-hooks  (blocks at commit time)
+    4. Push again.
+
+  This hook protects all repos on this server.
+  Installed by vibe-check --install-hooks --server
+
+============================================================
+EOF
+            rejected=1
+        fi
+    done <<< "$commits"
+done
+
+if [[ $rejected -eq 1 ]]; then
+    exit 1
+fi
+
+exit 0
+"""
+
 
 def _load_config(target_dir):
     """Load .vibecheckrc (JSON) from target_dir if it exists.
@@ -1603,15 +1685,40 @@ def _emit_json(findings, total_errors, total_warnings, scanned_files):
     print(json.dumps(result))
 
 
-def install_hooks(target_dir, global_hooks=False):
+def install_hooks(target_dir, global_hooks=False, server_mode=False):
     """Install git hooks that prevent AI co-author trailers from being committed.
 
     Without --global: installs a commit-msg hook in target_dir/.git/hooks/
     With --global: sets up a global git hooks directory via core.hooksPath.
+    With --server: installs pre-receive hook to all bare repos under target_dir.
 
     Returns True if hooks were installed/updated, False on error.
     """
     hook_path = None
+
+    if server_mode:
+        # Install pre-receive hook to all bare git repos under target_dir
+        bare_repos = list(target_dir.glob("*.git"))
+        if not bare_repos:
+            print(f"{RED}✖{RESET} No bare git repositories found in {target_dir}")
+            print(f"  Bare repos are directories ending in .git (e.g. myproject.git)")
+            return False
+        installed = 0
+        for repo in sorted(bare_repos):
+            if not (repo / "hooks").is_dir():
+                continue
+            hook_path = repo / "hooks" / "pre-receive"
+            hook_path.write_text(_PRE_RECEIVE_HOOK, encoding="utf-8")
+            try:
+                hook_path.chmod(0o755)
+            except (OSError, NotImplementedError):
+                pass
+            installed += 1
+        print(f"{GREEN}✔{RESET} Pre-receive hook installed to {installed} bare repo(s) under {target_dir}")
+        print(f"  Pushes containing AI co-author trailers will be rejected server-side.")
+        print(f"  This cannot be bypassed with git commit --no-verify.")
+        print(f"  Emergency bypass (server admin): VIBE_CHECK_ALLOW=1")
+        return True
 
     if global_hooks:
         hooks_dir = Path.home() / ".config" / "git" / "hooks"
@@ -1751,6 +1858,7 @@ def main():
     parser.add_argument("--no-cache", action="store_true", help="Disable file-hash caching (always re-scan every file)")
     parser.add_argument("--install-hooks", action="store_true", help="Install git commit-msg hook to block AI co-author trailers at commit time")
     parser.add_argument("--global", action="store_true", dest="global_hooks", help="With --install-hooks: install hooks globally (all repos)")
+    parser.add_argument("--server", action="store_true", dest="server_mode", help="With --install-hooks: install pre-receive hook to all bare repos (server-side, cannot be bypassed)")
     parser.add_argument("--json", action="store_true", dest="json_mode", help="Output findings as machine-readable JSON (for AI agent consumption)")
     parser.add_argument("--quiet", action="store_true", help="Suppress all human-readable output (use with --json for clean machine output)")
 
@@ -1758,7 +1866,8 @@ def main():
     target_path = Path(args.path)
 
     if args.install_hooks:
-        if not install_hooks(target_path, global_hooks=args.global_hooks):
+        if not install_hooks(target_path, global_hooks=args.global_hooks,
+                             server_mode=args.server_mode):
             sys.exit(1)
         return  # hooks installed, don't scan
 

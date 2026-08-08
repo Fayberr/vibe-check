@@ -140,8 +140,28 @@ FAILED: 3 error(s), 3 warning(s) found.
 | `--no-cache` | Disable file-hash caching (always re-scan) |
 | `--install-hooks` | Install git commit-msg hook to block AI co-author trailers |
 | `--install-hooks --global` | Install the commit-msg hook globally (all repos) |
+| `--install-hooks --server <dir>` | Install pre-receive hook on all bare repos (server-side, cannot be bypassed) |
 | `--json` | Output findings as machine-readable JSON (for AI agent consumption) |
 | `--quiet` | Suppress human-readable output (use with `--json` for clean machine output) |
+
+### Defense Layers Against AI Co-Author Trailers
+
+vibe-check provides layered defense. Each layer catches what the previous one might miss:
+
+| Layer | Scope | Bypassable? | Install |
+|-------|-------|-------------|---------|
+| 1. Settings fix | Per-machine (root cause) | No | `vibe-check --fix` |
+| 2. Commit-msg hook | Client-side | `--no-verify` | `vibe-check --install-hooks` |
+| 3. Pre-receive hook | Server-side (all pushes) | No | `vibe-check --install-hooks --server ~/` |
+| 4. Stop-hook scan | Session-end (Claude Code) | Machine scope | Automatic |
+| 5. Rule 51 detection | Retroactive scan | Detection only | Built-in |
+
+Recommended setup for self-hosted git servers:
+```bash
+vibe-check --fix                          # root cause: fix settings
+vibe-check --install-hooks --global       # client-side: block commits
+vibe-check --install-hooks --server ~/    # server-side: block pushes
+```
 
 ### Machine-Readable Output (`--json`)
 
