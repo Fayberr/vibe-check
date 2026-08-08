@@ -47,6 +47,24 @@ TEXT_EXTENSIONS = {
 # for every route file in the same project.
 _seen_project_warnings = set()
 
+
+def _load_config(target_dir):
+    """Load .vibecheckrc (JSON) from target_dir if it exists.
+
+    Schema:
+      {"rules": {"rule-id": "off"|"warn"|"error", ...}}
+
+    Returns a dict (empty if no config file found or parse error).
+    """
+    for name in (".vibecheckrc", ".vibe-check.json"):
+        cfg_path = target_dir / name
+        if cfg_path.is_file():
+            try:
+                return json.loads(cfg_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                return {}
+    return {}
+
 # ── Shared helpers (extracted from repeated patterns in check_file_content) ──────
 
 def _line_of(content, pos):
@@ -168,10 +186,16 @@ class SimpleHTMLInspector(HTMLParser):
         if self.in_title:
             self.title += data
 
-def check_file_content(file_path: Path, fix: bool = False):
+def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
     errors = []
     warnings = []
-    
+
+    def _sev(rule_id, default):
+        """Resolve effective severity: 'error', 'warn', or 'off'."""
+        if config is None:
+            return default
+        return config.get('rules', {}).get(rule_id, default)
+
     try:
         content = file_path.read_text(encoding="utf-8", errors="ignore")
     except Exception as e:
@@ -180,38 +204,59 @@ def check_file_content(file_path: Path, fix: bool = False):
     # Check 1: Em-dashes (U+2014)
     em_dash_matches = list(re.finditer(r"—", content))
     if em_dash_matches:
-        errors.append(f"Found {len(em_dash_matches)} em-dash ('—') character(s). Replace with comma (preferred) or standard dash '-'.")
-        if fix:
-            content = content.replace("—", ", ")
-            file_path.write_text(content, encoding="utf-8")
-            warnings.append("Auto-fixed em-dashes by replacing with commas.")
+        sev = _sev('em-dashes', 'error')
+        if sev != 'off':
+            (errors if sev == 'error' else warnings).append(
+                f"Found {len(em_dash_matches)} em-dash ('—') character(s). "
+                f"Replace with comma (preferred) or standard dash '-'."
+            )
+            if fix:
+                content = content.replace("—", ", ")
+                file_path.write_text(content, encoding="utf-8")
+                warnings.append("Auto-fixed em-dashes by replacing with commas.")
 
     # Check 2: Hardcoded vercel.app URLs
     if "vercel.app" in content and not file_path.name.endswith(".md"):
-        errors.append("Hardcoded 'vercel.app' URL detected in source code.")
+        sev = _sev('vercel-urls', 'error')
+        if sev != 'off':
+            (errors if sev == 'error' else warnings).append(
+                "Hardcoded 'vercel.app' URL detected in source code."
+            )
 
     # Check 3: Leftover AI builder watermarks
     # Skip .md files — documentation naturally references these by name.
     if not file_path.suffix == '.md':
-        watermarks = ["Made with Lovable", "Created with v0", "built with bolt.new"]
-        for wm in watermarks:
-            if wm.lower() in content.lower():
-                errors.append(f"Leftover AI builder watermark detected: '{wm}'")
+        sev = _sev('ai-watermarks', 'error')
+        if sev != 'off':
+            watermarks = ["Made with Lovable", "Created with v0", "built with bolt.new"]
+            for wm in watermarks:
+                if wm.lower() in content.lower():
+                    (errors if sev == 'error' else warnings).append(
+                        f"Leftover AI builder watermark detected: '{wm}'"
+                    )
 
     # Check 4: Placeholder text & fake reviews
     # Skip .md files — documentation naturally lists these as examples.
     if not file_path.suffix == '.md':
-        placeholders = ["John Doe", "Jane Smith", "Trusted by 10,000+ creators", "Lorem ipsum"]
-        for ph in placeholders:
-            if ph in content:
-                warnings.append(f"Placeholder copy detected: '{ph}'")
+        sev = _sev('placeholder-copy', 'warn')
+        if sev != 'off':
+            placeholders = ["John Doe", "Jane Smith", "Trusted by 10,000+ creators", "Lorem ipsum"]
+            for ph in placeholders:
+                if ph in content:
+                    (errors if sev == 'error' else warnings).append(
+                        f"Placeholder copy detected: '{ph}'"
+                    )
 
     # Check 5: Cursive/script font imports
     if not file_path.suffix == '.md':
-        script_fonts = ["Dancing+Script", "Pacifico", "Great+Vibes", "Satisfy", "Caveat"]
-        for font in script_fonts:
-            if font in content:
-                warnings.append(f"Cursive/script font import detected: '{font}'")
+        sev = _sev('script-fonts', 'warn')
+        if sev != 'off':
+            script_fonts = ["Dancing+Script", "Pacifico", "Great+Vibes", "Satisfy", "Caveat"]
+            for font in script_fonts:
+                if font in content:
+                    (errors if sev == 'error' else warnings).append(
+                        f"Cursive/script font import detected: '{font}'"
+                    )
 
     # Check 6: Unstyled <select> elements (TSX/JSX only).
     # Native selects render browser-default chrome (arrow, focus ring, white option
@@ -230,21 +275,25 @@ def check_file_content(file_path: Path, fix: bool = False):
                 if not _is_comment(content, pos):
                     unstyled.append(str(line_num))
         if unstyled:
-            errors.append(
-                f"Found {len(unstyled)} unstyled <select> element(s) (lines {', '.join(unstyled)}). "
-                f"Use a styled select component instead of raw <select> "
-                f"to ensure consistent theming and custom styling."
-            )
+            sev = _sev('unstyled-selects', 'error')
+            if sev != 'off':
+                (errors if sev == 'error' else warnings).append(
+                    f"Found {len(unstyled)} unstyled <select> element(s) (lines {', '.join(unstyled)}). "
+                    f"Use a styled select component instead of raw <select> "
+                    f"to ensure consistent theming and custom styling."
+                )
 
     # Check 7: dangerouslySetInnerHTML (TSX/JSX only) — ERROR.
     # AI loves to suggest this for "just inject this HTML" without understanding
     # it's an XSS vector. There's almost always a safer alternative.
     if file_path.suffix in (".tsx", ".jsx"):
         if "dangerouslySetInnerHTML" in content:
-            errors.append(
-                "Found dangerouslySetInnerHTML — an XSS vector. "
-                "Use a safe renderer or properly sanitize content before injection."
-            )
+            sev = _sev('dangerously-set-html', 'error')
+            if sev != 'off':
+                (errors if sev == 'error' else warnings).append(
+                    "Found dangerouslySetInnerHTML — an XSS vector. "
+                    "Use a safe renderer or properly sanitize content before injection."
+                )
 
     # Check 8: target="_blank" without rel="noopener noreferrer" (HTML/JSX/TSX) — ERROR.
     # AI generates this constantly; it's a security best-practice since forever.
@@ -263,11 +312,13 @@ def check_file_content(file_path: Path, fix: bool = False):
                 line_num = content[:match.start()].count('\n') + 1
                 insecure.append(str(line_num))
         if insecure:
-            errors.append(
-                f"Found {len(insecure)} target=\"_blank\" link(s) without "
-                f"rel=\"noopener noreferrer\" (lines {', '.join(insecure)}). "
-                f"Add rel=\"noopener noreferrer\" to prevent tab-napping attacks."
-            )
+            sev = _sev('target-blank-noopener', 'error')
+            if sev != 'off':
+                (errors if sev == 'error' else warnings).append(
+                    f"Found {len(insecure)} target=\"_blank\" link(s) without "
+                    f"rel=\"noopener noreferrer\" (lines {', '.join(insecure)}). "
+                    f"Add rel=\"noopener noreferrer\" to prevent tab-napping attacks."
+                )
 
     # Check 9: console.log in frontend code (.tsx only) — WARN.
     # Debugging artifacts shipped to users. Not a hard block because console
@@ -275,28 +326,32 @@ def check_file_content(file_path: Path, fix: bool = False):
     if file_path.suffix in (".tsx",):
         log_matches = list(re.finditer(r'\bconsole\.log\b', content))
         if log_matches:
-            lines = sorted(set(
-                str(content[:m.start()].count('\n') + 1) for m in log_matches
-            ))
-            warnings.append(
-                f"Found {len(log_matches)} console.log() call(s) (lines {', '.join(lines[:10])}"
-                f"{'...' if len(lines) > 10 else ''}). "
-                f"Remove debugging logs before shipping to production."
-            )
+            sev = _sev('console-log', 'warn')
+            if sev != 'off':
+                lines = sorted(set(
+                    str(content[:m.start()].count('\n') + 1) for m in log_matches
+                ))
+                (errors if sev == 'error' else warnings).append(
+                    f"Found {len(log_matches)} console.log() call(s) (lines {', '.join(lines[:10])}"
+                    f"{'...' if len(lines) > 10 else ''}). "
+                    f"Remove debugging logs before shipping to production."
+                )
 
     # Check 10: Inline style={{...}} objects (TSX/JSX only) — WARN.
     # Bypasses Tailwind theme, creates consistency issues across the app.
     if file_path.suffix in (".tsx", ".jsx"):
         inline_styles = list(re.finditer(r'\bstyle\s*=\s*\{\{', content))
         if inline_styles:
-            lines = sorted(set(
-                str(content[:m.start()].count('\n') + 1) for m in inline_styles
-            ))
-            warnings.append(
-                f"Found {len(inline_styles)} inline style={{...}} object(s) (lines {', '.join(lines[:10])}"
-                f"{'...' if len(lines) > 10 else ''}). "
-                f"Use Tailwind classes or CSS modules instead for consistent theming."
-            )
+            sev = _sev('inline-styles', 'warn')
+            if sev != 'off':
+                lines = sorted(set(
+                    str(content[:m.start()].count('\n') + 1) for m in inline_styles
+                ))
+                (errors if sev == 'error' else warnings).append(
+                    f"Found {len(inline_styles)} inline style={{...}} object(s) (lines {', '.join(lines[:10])}"
+                    f"{'...' if len(lines) > 10 else ''}). "
+                    f"Use Tailwind classes or CSS modules instead for consistent theming."
+                )
 
     # Check 11: <img> without alt text (JSX/TSX) — ERROR.
     # Accessibility isn't optional. The HTML parser catches this for .html files
@@ -313,12 +368,14 @@ def check_file_content(file_path: Path, fix: bool = False):
                     imgs_missing_alt += 1
                     missing_lines.append(str(line_num))
         if imgs_missing_alt > 0:
-            errors.append(
-                f"Found {imgs_missing_alt} <img> element(s) without alt text "
-                f"(lines {', '.join(missing_lines[:10])}"
-                f"{'...' if len(missing_lines) > 10 else ''}). "
-                f"Every image must have descriptive alt text for accessibility."
-            )
+            sev = _sev('img-no-alt', 'error')
+            if sev != 'off':
+                (errors if sev == 'error' else warnings).append(
+                    f"Found {imgs_missing_alt} <img> element(s) without alt text "
+                    f"(lines {', '.join(missing_lines[:10])}"
+                    f"{'...' if len(missing_lines) > 10 else ''}). "
+                    f"Every image must have descriptive alt text for accessibility."
+                )
 
     # Check 12: TODO / FIXME / HACK comments — WARN.
     # Tech debt markers. Flag as warnings so they're visible but don't block.
@@ -328,11 +385,13 @@ def check_file_content(file_path: Path, fix: bool = False):
             line_num = content[:match.start()].count('\n') + 1
             markers.append(f"L{line_num}:{match.group(1)}")
         if markers:
-            warnings.append(
-                f"Found {len(markers)} tech-debt marker(s): {', '.join(markers[:8])}"
-                f"{'...' if len(markers) > 8 else ''}. "
-                f"Resolve or track these before shipping."
-            )
+            sev = _sev('tech-debt-markers', 'warn')
+            if sev != 'off':
+                (errors if sev == 'error' else warnings).append(
+                    f"Found {len(markers)} tech-debt marker(s): {', '.join(markers[:8])}"
+                    f"{'...' if len(markers) > 8 else ''}. "
+                    f"Resolve or track these before shipping."
+                )
 
     # Check 13: `as` type casts in TypeScript — WARN.
     # Often used where proper type narrowing would catch edge cases. Flag patterns
@@ -346,15 +405,17 @@ def check_file_content(file_path: Path, fix: bool = False):
         # Exclude `as const` (idiomatic TypeScript)
         casts = [c for c in casts if c.group(1) != 'const']
         if casts:
-            lines = sorted(set(
-                str(content[:c.start()].count('\n') + 1) for c in casts
-            ))
-            warnings.append(
-                f"Found {len(casts)} `as` type cast(s) (lines {', '.join(lines[:10])}"
-                f"{'...' if len(lines) > 10 else ''}). "
-                f"Prefer proper type narrowing or type guards over `as` casts "
-                f"which silently bypass type checking."
-            )
+            sev = _sev('as-type-casts', 'warn')
+            if sev != 'off':
+                lines = sorted(set(
+                    str(content[:c.start()].count('\n') + 1) for c in casts
+                ))
+                (errors if sev == 'error' else warnings).append(
+                    f"Found {len(casts)} `as` type cast(s) (lines {', '.join(lines[:10])}"
+                    f"{'...' if len(lines) > 10 else ''}). "
+                    f"Prefer proper type narrowing or type guards over `as` casts "
+                    f"which silently bypass type checking."
+                )
 
     # Check 14: XSS sinks — ERROR.
     # innerHTML/outerHTML assignments, insertAdjacentHTML, document.write,
@@ -402,12 +463,14 @@ def check_file_content(file_path: Path, fix: bool = False):
                     line_num = content[:m.start()].count('\n') + 1
                     found.append(f"L{line_num}:{label}")
         if found:
-            errors.append(
-                f"Found {len(found)} XSS sink(s): {', '.join(found[:10])}"
-                f"{'...' if len(found) > 10 else ''}. "
-                f"Replace innerHTML/outerHTML with textContent or safe DOM APIs; "
-                f"use framework templating instead of v-html/javascript: URLs."
-            )
+            sev = _sev('xss-sinks', 'error')
+            if sev != 'off':
+                (errors if sev == 'error' else warnings).append(
+                    f"Found {len(found)} XSS sink(s): {', '.join(found[:10])}"
+                    f"{'...' if len(found) > 10 else ''}. "
+                    f"Replace innerHTML/outerHTML with textContent or safe DOM APIs; "
+                    f"use framework templating instead of v-html/javascript: URLs."
+                )
 
     # Check 15: File upload security gaps — WARN.
     # Catch three common patterns: <input type="file"> without accept
@@ -439,7 +502,9 @@ def check_file_content(file_path: Path, fix: bool = False):
                     line_num = content[:pos].count('\n') + 1
                     upload_gaps.append(f"L{line_num}:express-static-uploads")
         if upload_gaps:
-            warnings.append(
+            sev = _sev('file-upload-gaps', 'warn')
+            if sev != 'off':
+                (errors if sev == 'error' else warnings).append(
                 f"Found {len(upload_gaps)} file-upload security gap(s): "
                 f"{', '.join(upload_gaps[:10])}"
                 f"{'...' if len(upload_gaps) > 10 else ''}. "
@@ -504,12 +569,14 @@ def check_file_content(file_path: Path, fix: bool = False):
                         first_route = content[:m.start()].count('\n') + 1
                         break
                 loc = f" (first route near line {first_route})" if first_route else ""
-                warnings.append(
-                    f"Webhook handler detected but no HMAC signature verification "
-                    f"found in the same file{loc}. Unsigned webhooks accept arbitrary "
-                    f"events from anyone. Add HMAC signature verification using "
-                    f"crypto.timingSafeEqual (Node) or hmac.compare_digest (Python)."
-                )
+                sev = _sev('unsigned-webhooks', 'warn')
+                if sev != 'off':
+                    (errors if sev == 'error' else warnings).append(
+                        f"Webhook handler detected but no HMAC signature verification "
+                        f"found in the same file{loc}. Unsigned webhooks accept arbitrary "
+                        f"events from anyone. Add HMAC signature verification using "
+                        f"crypto.timingSafeEqual (Node) or hmac.compare_digest (Python)."
+                    )
 
     # Check 17: Hardcoded secrets — ERROR.
     # AI assistants inline API keys, DB credentials, and access tokens from
@@ -581,13 +648,15 @@ def check_file_content(file_path: Path, fix: bool = False):
                 line_num = content[:pos].count('\n') + 1
                 found_secrets.append(f"L{line_num}:DB-credentials-in-URL")
         if found_secrets:
-            errors.append(
-                f"Found {len(found_secrets)} hardcoded secret(s): "
-                f"{', '.join(found_secrets[:10])}"
-                f"{'...' if len(found_secrets) > 10 else ''}. "
-                f"Move secrets to environment variables or a secrets manager, "
-                f"and rotate any exposed credentials immediately."
-            )
+            sev = _sev('hardcoded-secrets', 'error')
+            if sev != 'off':
+                (errors if sev == 'error' else warnings).append(
+                    f"Found {len(found_secrets)} hardcoded secret(s): "
+                    f"{', '.join(found_secrets[:10])}"
+                    f"{'...' if len(found_secrets) > 10 else ''}. "
+                    f"Move secrets to environment variables or a secrets manager, "
+                    f"and rotate any exposed credentials immediately."
+                )
 
     # Check 18: Broken JWT validation — ERROR.
     # AI assistants copy the shortest jwt.decode() call from docs, which often
@@ -673,20 +742,24 @@ def check_file_content(file_path: Path, fix: bool = False):
                     else:
                         jwt_errors.append(f"L{ln}:{label}")
         if jwt_errors:
-            errors.append(
-                f"Found {len(jwt_errors)} broken JWT validation(s): "
-                f"{', '.join(jwt_errors[:8])}"
-                f"{'...' if len(jwt_errors) > 8 else ''}. "
-                f"Always verify JWT signatures with an explicit algorithm allowlist "
-                f"(e.g. algorithms=['RS256']). Never accept alg:none."
-            )
+            sev = _sev('broken-jwt', 'error')
+            if sev != 'off':
+                (errors if sev == 'error' else warnings).append(
+                    f"Found {len(jwt_errors)} broken JWT validation(s): "
+                    f"{', '.join(jwt_errors[:8])}"
+                    f"{'...' if len(jwt_errors) > 8 else ''}. "
+                    f"Always verify JWT signatures with an explicit algorithm allowlist "
+                    f"(e.g. algorithms=['RS256']). Never accept alg:none."
+                )
         if jwt_warns:
-            warnings.append(
-                f"Found {len(jwt_warns)} potentially insecure JWT pattern(s): "
-                f"{', '.join(jwt_warns[:8])}"
-                f"{'...' if len(jwt_warns) > 8 else ''}. "
-                f"Use jwt.verify() (not jwt.decode()) and pin algorithm allowlists."
-            )
+            sev = _sev('broken-jwt', 'warn')
+            if sev != 'off':
+                (errors if sev == 'error' else warnings).append(
+                    f"Found {len(jwt_warns)} potentially insecure JWT pattern(s): "
+                    f"{', '.join(jwt_warns[:8])}"
+                    f"{'...' if len(jwt_warns) > 8 else ''}. "
+                    f"Use jwt.verify() (not jwt.decode()) and pin algorithm allowlists."
+                )
 
     # Check 19: Debug mode enabled — WARN.
     # AI generates config with DEBUG=True from templates, never changes it before
@@ -736,13 +809,15 @@ def check_file_content(file_path: Path, fix: bool = False):
                     ln = content[:m.start()].count('\n') + 1
                     debug_found.append(f"L{ln}:{label}")
         if debug_found:
-            warnings.append(
-                f"Found {len(debug_found)} debug-mode indicator(s): "
-                f"{', '.join(debug_found[:8])}"
-                f"{'...' if len(debug_found) > 8 else ''}. "
-                f"Disable debug mode in production — debug consoles expose "
-                f"interactive code execution and stack traces with secrets."
-            )
+            sev = _sev('debug-mode', 'warn')
+            if sev != 'off':
+                (errors if sev == 'error' else warnings).append(
+                    f"Found {len(debug_found)} debug-mode indicator(s): "
+                    f"{', '.join(debug_found[:8])}"
+                    f"{'...' if len(debug_found) > 8 else ''}. "
+                    f"Disable debug mode in production — debug consoles expose "
+                    f"interactive code execution and stack traces with secrets."
+                )
 
     # Check 20: Unsafe deserialization — ERROR.
     # pickle.loads(), yaml.load() without SafeLoader, and similar functions
@@ -789,13 +864,15 @@ def check_file_content(file_path: Path, fix: bool = False):
                 ln = content[:pos].count('\n') + 1
                 deser_found.append(f"L{ln}:vm.runInNewContext")
         if deser_found:
-            errors.append(
-                f"Found {len(deser_found)} unsafe deserialization call(s): "
-                f"{', '.join(deser_found[:8])}"
-                f"{'...' if len(deser_found) > 8 else ''}. "
-                f"Use safe parsers: yaml.safe_load(), json.loads(), or isolated "
-                f"execution. pickle.loads() on untrusted input is remote code execution."
-            )
+            sev = _sev('unsafe-deserialization', 'error')
+            if sev != 'off':
+                (errors if sev == 'error' else warnings).append(
+                    f"Found {len(deser_found)} unsafe deserialization call(s): "
+                    f"{', '.join(deser_found[:8])}"
+                    f"{'...' if len(deser_found) > 8 else ''}. "
+                    f"Use safe parsers: yaml.safe_load(), json.loads(), or isolated "
+                    f"execution. pickle.loads() on untrusted input is remote code execution."
+                )
 
     # Check 21: Math.random() in security-sensitive contexts — WARN.
     # Math.random() is not cryptographically secure. AI assistants frequently
@@ -848,13 +925,15 @@ def check_file_content(file_path: Path, fix: bool = False):
                     seen_lines.add(line_num)
                     rand_found.append(f"L{line_num}:near-{hits[0]}")
             if rand_found:
-                warnings.append(
-                    f"Found {len(rand_found)} Math.random() in security-sensitive context(s): "
-                    f"{', '.join(rand_found[:8])}"
-                    f"{'...' if len(rand_found) > 8 else ''}. "
-                    f"Math.random() is not cryptographically secure. "
-                    f"Use crypto.randomUUID() or crypto.getRandomValues() instead."
-                )
+                sev = _sev('math-random-security', 'warn')
+                if sev != 'off':
+                    (errors if sev == 'error' else warnings).append(
+                        f"Found {len(rand_found)} Math.random() in security-sensitive context(s): "
+                        f"{', '.join(rand_found[:8])}"
+                        f"{'...' if len(rand_found) > 8 else ''}. "
+                        f"Math.random() is not cryptographically secure. "
+                        f"Use crypto.randomUUID() or crypto.getRandomValues() instead."
+                    )
 
     # Check 22: Missing security headers — WARN.
     # AI generates route handlers and page templates but omits security headers
@@ -886,11 +965,13 @@ def check_file_content(file_path: Path, fix: bool = False):
                 gap_key = f"sec-headers-{header_gap}"
                 if gap_key not in _seen_project_warnings:
                     _seen_project_warnings.add(gap_key)
-                    warnings.append(
-                        f"{header_gap} server detected but no security headers "
-                        f"middleware found (helmet/Talisman/Secure). Add CSP, HSTS, "
-                        f"X-Frame-Options, and X-Content-Type-Options headers."
-                    )
+                    sev = _sev('missing-security-headers', 'warn')
+                    if sev != 'off':
+                        (errors if sev == 'error' else warnings).append(
+                            f"{header_gap} server detected but no security headers "
+                            f"middleware found (helmet/Talisman/Secure). Add CSP, HSTS, "
+                            f"X-Frame-Options, and X-Content-Type-Options headers."
+                        )
 
     # Check 23: Potential SSRF via unfiltered user URLs — WARN.
     # URL preview, webhook registration, and image import features often pass
@@ -944,14 +1025,16 @@ def check_file_content(file_path: Path, fix: bool = False):
                                 client_name = re.match(r'\b(\w+(?:\.\w+)*)', client_pat.strip(r'\b').lstrip('\\b'))
                                 ssrf_found.append(f"L{ln}:{client_name.group(1)}-from-request")
             if ssrf_found:
-                warnings.append(
-                    f"Found {len(ssrf_found)} potential SSRF vector(s): "
-                    f"{', '.join(ssrf_found[:8])}"
-                    f"{'...' if len(ssrf_found) > 8 else ''}. "
-                    f"Validate and sanitize all user-supplied URLs, or use an "
-                    f"allowlist of permitted hosts. User-controlled URLs can access "
-                    f"internal services and cloud metadata endpoints."
-                )
+                sev = _sev('ssrf-user-urls', 'warn')
+                if sev != 'off':
+                    (errors if sev == 'error' else warnings).append(
+                        f"Found {len(ssrf_found)} potential SSRF vector(s): "
+                        f"{', '.join(ssrf_found[:8])}"
+                        f"{'...' if len(ssrf_found) > 8 else ''}. "
+                        f"Validate and sanitize all user-supplied URLs, or use an "
+                        f"allowlist of permitted hosts. User-controlled URLs can access "
+                        f"internal services and cloud metadata endpoints."
+                    )
 
     # Check 24: No rate limiting configured — WARN.
     # Resource exhaustion was the #1 flaw in Xint.io's 434-flaw audit (93 issues).
@@ -980,11 +1063,13 @@ def check_file_content(file_path: Path, fix: bool = False):
                 rl_key = f"rate-limit-{rl_gap}"
                 if rl_key not in _seen_project_warnings:
                     _seen_project_warnings.add(rl_key)
-                    warnings.append(
-                        f"No rate limiting middleware detected in {rl_gap} server. "
-                        f"Add rate limiting (express-rate-limit / slowapi / flask-limiter) "
-                        f"to prevent brute-force, credential stuffing, and resource exhaustion attacks."
-                    )
+                    sev = _sev('no-rate-limiting', 'warn')
+                    if sev != 'off':
+                        (errors if sev == 'error' else warnings).append(
+                            f"No rate limiting middleware detected in {rl_gap} server. "
+                            f"Add rate limiting (express-rate-limit / slowapi / flask-limiter) "
+                            f"to prevent brute-force, credential stuffing, and resource exhaustion attacks."
+                        )
 
     return errors, warnings
 
@@ -1072,6 +1157,9 @@ def scan_directory(target_dir: Path, is_prod: bool = False, fix: bool = False,
     global _seen_project_warnings
     _seen_project_warnings = set()
 
+    # Load project config (.vibecheckrc or .vibe-check.json)
+    config = _load_config(target_dir)
+
     total_errors = 0
     total_warnings = 0
     scanned_files = 0
@@ -1156,7 +1244,7 @@ def scan_directory(target_dir: Path, is_prod: bool = False, fix: bool = False,
             scanned_files += 1
 
             # Content checks
-            content_errors, content_warnings = check_file_content(file_path, fix=fix)
+            content_errors, content_warnings = check_file_content(file_path, fix=fix, config=config)
             
             # HTML specific checks
             html_errors, html_warnings = [], []
