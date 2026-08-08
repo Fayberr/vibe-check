@@ -9,6 +9,8 @@ import subprocess
 from pathlib import Path
 from html.parser import HTMLParser
 
+__version__ = "1.0.0"
+
 # --- Color formatting for CLI ---
 RED = "\033[91m"
 GREEN = "\033[92m"
@@ -80,7 +82,14 @@ class Finding:
         if self.file is not None:
             d["file"] = self.file
         return d
-        return d
+
+    @classmethod
+    def from_dict(cls, d):
+        """Rebuild a Finding from to_dict() output, so cached findings can be replayed."""
+        return cls(
+            d["rule"], d["severity"], d["message"],
+            line=d.get("line"), fixable=d.get("fixable", False), file=d.get("file"),
+        )
 
 # ── Git commit-msg hook (installed by --install-hooks) ──────────────────────
 # Embedded as a constant so vibe-check stays single-file. This hook blocks
@@ -237,6 +246,131 @@ def _load_config(target_dir):
             except (json.JSONDecodeError, OSError):
                 return {}
     return {}
+
+
+# ── Findings cache ──────────────────────────────────────────────────────────────
+# Cache format v2.
+#
+# v1 stored only {path: sha256} and did a bare `continue` on a hash hit, so an
+# unchanged file contributed ZERO findings to the run. Scanning the same code
+# twice gave two different verdicts (25 errors, then 15), which made pass/fail a
+# function of run history rather than of the code. A gate that passes on the
+# second try is worse than no gate.
+#
+# v2 stores the findings themselves and replays them on a hit, so a cached run
+# and a --no-cache run always report identically. The cache is also keyed on the
+# tool source and the resolved config, so adding or re-severing a rule
+# invalidates every previously-cached file instead of silently never firing.
+CACHE_VERSION = 2
+
+# Rules deduplicated project-wide (one finding per project, whichever file the
+# walk reaches first). Replaying one from cache would not repopulate the dedup
+# set, so a later real scan could emit a second copy. Files carrying one are
+# therefore never cached and are always re-scanned.
+_UNCACHEABLE_RULES = {'missing-security-headers', 'no-rate-limiting'}
+
+_tool_sig_cache = None
+
+
+def _cache_dir():
+    """Per-user cache directory. Never inside the scanned project.
+
+    v1 wrote .vibe-check-cache.json into the project root, where it showed up as
+    an untracked file in everyone's git status.
+    """
+    override = os.environ.get("VIBE_CHECK_CACHE_DIR")
+    if override:
+        return Path(override)
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    if xdg:
+        return Path(xdg) / "vibe-check"
+    if os.name == "nt":
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            return Path(local) / "vibe-check" / "cache"
+    return Path.home() / ".cache" / "vibe-check"
+
+
+def _cache_path_for(target_dir):
+    """Cache file for one project. Name keeps the directory name for readability,
+    the hash keeps two same-named projects in different places apart."""
+    resolved = str(target_dir.resolve())
+    digest = hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:12]
+    slug = re.sub(r'[^A-Za-z0-9._-]', '_', target_dir.resolve().name) or "project"
+    return _cache_dir() / f"{slug}-{digest}.json"
+
+
+def _tool_signature():
+    """Hash of this script, so shipping a new or changed rule invalidates the cache.
+
+    Falls back to the version string if the source is unreadable (frozen binary,
+    odd loader) — degraded but never fatal.
+    """
+    global _tool_sig_cache
+    if _tool_sig_cache is None:
+        try:
+            _tool_sig_cache = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        except Exception:
+            _tool_sig_cache = f"version:{__version__}"
+    return _tool_sig_cache
+
+
+def _config_signature(config, is_prod):
+    """Hash of everything besides file content that changes what a scan reports."""
+    payload = json.dumps({"config": config, "prod": bool(is_prod)}, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _load_findings_cache(target_dir, config, is_prod):
+    """Return the cached {path: {hash, findings}} map, or {} if unusable.
+
+    Any signature mismatch discards the whole cache rather than trusting part of
+    it: a half-valid cache is what produced the original bug.
+    """
+    try:
+        path = _cache_path_for(target_dir)
+        if not path.exists():
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {}
+        if data.get("version") != CACHE_VERSION:
+            return {}
+        if data.get("tool_sig") != _tool_signature():
+            return {}
+        if data.get("config_sig") != _config_signature(config, is_prod):
+            return {}
+        files = data.get("files")
+        return files if isinstance(files, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_findings_cache(target_dir, files, config, is_prod):
+    """Best-effort write. A cache that cannot be written must never fail a scan."""
+    try:
+        path = _cache_path_for(target_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "version": CACHE_VERSION,
+            "tool_sig": _tool_signature(),
+            "config_sig": _config_signature(config, is_prod),
+            "files": files,
+        }), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _remove_legacy_cache(target_dir):
+    """Delete the v1 in-project cache file. It is ours, it is stale, and it is
+    the reason projects had an untracked .vibe-check-cache.json lying around."""
+    try:
+        legacy = target_dir / ".vibe-check-cache.json"
+        if legacy.is_file():
+            legacy.unlink()
+    except Exception:
+        pass
+
 
 # ── Shared helpers (extracted from repeated patterns in check_file_content) ──────
 
@@ -1383,7 +1517,8 @@ def scan_directory(target_dir: Path, is_prod: bool = False, fix: bool = False,
 
     total_errors = 0
     total_warnings = 0
-    scanned_files = 0
+    scanned_files = 0   # every file the report covers (freshly scanned + replayed)
+    cached_files = 0    # subset of the above that came back from cache
     all_findings = []  # accumulated for --json output
 
     # ── Claude Code attribution settings check ─────────────────────────────────
@@ -1403,14 +1538,12 @@ def scan_directory(target_dir: Path, is_prod: bool = False, fix: bool = False,
             print(f"  {RED}✖ [ERROR]{RESET} {f}" if f.severity == 'error' else f"  {YELLOW}⚠ [WARN]{RESET}  {f}")
 
     # ── Cache ──────────────────────────────────────────────────────────────────
-    cache_path = target_dir / ".vibe-check-cache.json"
-    cache = {}
-    if use_cache:
-        try:
-            if cache_path.exists():
-                cache = json.loads(cache_path.read_text(encoding="utf-8"))
-        except Exception:
-            cache = {}
+    # Holds findings, not just "was scanned" — see the _load_findings_cache notes.
+    _remove_legacy_cache(target_dir)
+    cache = _load_findings_cache(target_dir, config, is_prod) if use_cache else {}
+    # Seeded from the old cache so a partial run (--changed) does not discard
+    # entries for files it never walked. Dead paths are pruned at save time.
+    next_cache = dict(cache)
 
     # ── Git-aware file list (--changed) ────────────────────────────────────────
     changed_file_set = None
@@ -1473,32 +1606,43 @@ def scan_directory(target_dir: Path, is_prod: bool = False, fix: bool = False,
             if changed_file_set is not None and str(file_path.resolve()) not in changed_file_set:
                 continue
 
-            # Cache check: skip files whose hash hasn't changed
+            # Cache check: replay findings for files whose hash hasn't changed.
+            # Note this REPLAYS rather than skips — a cached file still reports
+            # its errors, so the verdict is the same with and without the cache.
             file_hash = None
+            entry = None
             if use_cache and not fix:
                 try:
                     file_hash = hashlib.sha256(file_path.read_bytes()).hexdigest()
                 except Exception:
                     pass
-                if file_hash and cache.get(str(file_path)) == file_hash:
-                    continue  # unchanged
+                if file_hash:
+                    candidate = cache.get(str(file_path))
+                    if isinstance(candidate, dict) and candidate.get("hash") == file_hash:
+                        entry = candidate
 
             scanned_files += 1
 
-            # Content checks
-            content_errors, content_warnings = check_file_content(file_path, fix=fix, config=config)
+            if entry is not None:
+                restored = [Finding.from_dict(d) for d in entry.get("findings", [])]
+                file_errors = [f for f in restored if f.severity == 'error']
+                file_warnings = [f for f in restored if f.severity != 'error']
+                cached_files += 1
+            else:
+                # Content checks
+                content_errors, content_warnings = check_file_content(file_path, fix=fix, config=config)
 
-            # HTML specific checks
-            html_errors, html_warnings = [], []
-            if file_path.suffix in (".html", ".htm"):
-                html_errors, html_warnings = check_html_file(file_path, is_prod=is_prod)
+                # HTML specific checks
+                html_errors, html_warnings = [], []
+                if file_path.suffix in (".html", ".htm"):
+                    html_errors, html_warnings = check_html_file(file_path, is_prod=is_prod)
 
-            file_errors = content_errors + html_errors
-            file_warnings = content_warnings + html_warnings
+                file_errors = content_errors + html_errors
+                file_warnings = content_warnings + html_warnings
 
-            # Stamp file path on all findings
-            for f in file_errors + file_warnings:
-                f.file = str(rel_path)
+                # Stamp file path on all findings
+                for f in file_errors + file_warnings:
+                    f.file = str(rel_path)
 
             if json_mode:
                 all_findings.extend(f.to_dict() for f in file_errors)
@@ -1514,16 +1658,23 @@ def scan_directory(target_dir: Path, is_prod: bool = False, fix: bool = False,
                 for warn in file_warnings:
                     print(f"  {YELLOW}⚠ [WARN]{RESET}  {warn}")
 
-            # Update cache with this file's hash so it's skipped next run if unchanged
-            if use_cache and file_hash:
-                cache[str(file_path)] = file_hash
+            # Store this file's findings so the next run replays them verbatim.
+            if use_cache and file_hash and entry is None:
+                rules = {f.rule for f in file_errors + file_warnings}
+                if rules & _UNCACHEABLE_RULES:
+                    # Project-wide deduplicated finding: must be re-derived each
+                    # run so the dedup set is rebuilt in walk order.
+                    next_cache.pop(str(file_path), None)
+                else:
+                    next_cache[str(file_path)] = {
+                        "hash": file_hash,
+                        "findings": [f.to_dict() for f in file_errors + file_warnings],
+                    }
 
     # ── Save cache ──────────────────────────────────────────────────────────
-    if use_cache:
-        try:
-            cache_path.write_text(json.dumps(cache), encoding="utf-8")
-        except Exception:
-            pass
+    if use_cache and not fix:
+        pruned = {p: e for p, e in next_cache.items() if Path(p).is_file()}
+        _save_findings_cache(target_dir, pruned, config, is_prod)
 
     # Situational checks
     if is_prod:
@@ -1627,11 +1778,12 @@ def scan_directory(target_dir: Path, is_prod: bool = False, fix: bool = False,
             print(f"         Run {BOLD}vibe-check --setup{RESET} to audit and fix all prevention layers.")
 
     if json_mode:
-        _emit_json(all_findings, total_errors, total_warnings, scanned_files)
+        _emit_json(all_findings, total_errors, total_warnings, scanned_files, cached_files)
 
     if not quiet:
         print(f"\n{BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}")
-        print(f"Scanned {scanned_files} file(s).")
+        cache_note = f" ({cached_files} restored from cache)" if cached_files else ""
+        print(f"Scanned {scanned_files} file(s){cache_note}.")
 
         if total_errors > 0:
             print(f"{RED}{BOLD}FAILED:{RESET} {total_errors} error(s), {total_warnings} warning(s) found.\n")
@@ -1641,10 +1793,13 @@ def scan_directory(target_dir: Path, is_prod: bool = False, fix: bool = False,
             print(f"{GREEN}{BOLD}PASSED:{RESET} 100% Clean! Zero anti-slop red flags found.\n")
     sys.exit(1 if total_errors > 0 else 0)
 
-def _emit_json(findings, total_errors, total_warnings, scanned_files):
+def _emit_json(findings, total_errors, total_warnings, scanned_files, cached_files=0):
     """Emit findings as a machine-readable JSON object to stdout.
 
     `findings` is a list of dicts (from Finding.to_dict()) or Finding objects.
+    `scanned` counts every file the report covers, including cache replays, so
+    it never disagrees with `findings`. `cached` is how many of those were
+    replayed rather than re-read.
     """
     items = []
     for f in findings:
@@ -1655,6 +1810,7 @@ def _emit_json(findings, total_errors, total_warnings, scanned_files):
     result = {
         "status": "failed" if total_errors > 0 else ("warn" if total_warnings > 0 else "ok"),
         "scanned": scanned_files,
+        "cached": cached_files,
         "errors": total_errors,
         "warnings": total_warnings,
         "findings": items,

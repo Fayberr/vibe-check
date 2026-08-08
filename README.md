@@ -272,7 +272,13 @@ Security checks are designed to minimize noise:
 
 ### Caching
 
-File hashes are cached in `.vibe-check-cache.json` (project root). Unchanged files are skipped on subsequent runs. Add this file to `.gitignore`.
+Findings are cached per file, keyed on the file's hash. An unchanged file has its findings replayed from cache instead of being re-read, so repeat scans are fast **without changing the verdict**: a cached run and a `--no-cache` run always report the same errors and warnings. Use `--no-cache` to force a full re-read.
+
+The cache lives outside your project, at `$XDG_CACHE_HOME/vibe-check/` (or `~/.cache/vibe-check/`), so there is nothing to add to `.gitignore`. Override with `VIBE_CHECK_CACHE_DIR`.
+
+The cache key includes a hash of vibe-check itself and of your resolved config, so upgrading the tool or editing `.vibecheckrc` invalidates every entry. New rules always fire on untouched code.
+
+> Upgrading from an older version: it wrote `.vibe-check-cache.json` into the project root and **skipped** unchanged files rather than replaying them, which meant a second scan of the same code reported fewer problems than the first. That file is now deleted automatically on the next scan.
 
 ## Contributing
 

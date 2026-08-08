@@ -19,7 +19,30 @@ import sys
 import tempfile
 from pathlib import Path
 
-HOOK = Path(__file__).resolve().parent / "vibe-check-stop-hook.py"
+def _resolve_hook():
+    """Locate the stop hook.
+
+    The hook is installed under the Claude Code config dir, not next to this
+    file. Pointing at a nonexistent path made the suite pass its headline
+    assertion for the wrong reason: python exits 2 on "no such file", which is
+    the same exit code a real block uses. Fail loudly instead.
+    """
+    override = os.environ.get("VIBE_CHECK_STOP_HOOK")
+    candidates = [Path(override)] if override else []
+    candidates += [
+        Path(__file__).resolve().parent / "vibe-check-stop-hook.py",
+        Path.home() / ".claude" / "hooks" / "vibe-check-stop-hook.py",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise SystemExit(
+        "stop hook not found. Looked in:\n  " + "\n  ".join(str(c) for c in candidates)
+        + "\nSet VIBE_CHECK_STOP_HOOK to its path."
+    )
+
+
+HOOK = _resolve_hook()
 EM_DASH = "—"
 
 results = []

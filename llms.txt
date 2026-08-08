@@ -49,6 +49,7 @@ Run only the fix commands for checks where status is needs_fix or not_installed:
 {
   "status": "failed",
   "scanned": 43,
+  "cached": 37,
   "errors": 3,
   "warnings": 5,
   "findings": [
@@ -66,6 +67,8 @@ Run only the fix commands for checks where status is needs_fix or not_installed:
 - `status`: "ok" (no findings), "warn" (warnings only), "failed" (errors present)
 - `findings` may omit `line` and `file` for project-level checks
 - `fixable`: true means `--fix` can auto-fix this specific finding
+- `scanned`: total files covered by this report, including cache replays
+- `cached`: how many of those were replayed from cache rather than re-read. Cached findings are included in `findings`, `errors`, and `warnings`, so the verdict never depends on whether the cache was warm. You do not need `--no-cache` to trust a result.
 
 ## Exit codes
 | Exit | Meaning |
