@@ -1,0 +1,1280 @@
+#!/usr/bin/env python3
+import sys
+import os
+import re
+import json
+import hashlib
+import argparse
+from pathlib import Path
+from html.parser import HTMLParser
+
+# --- Color formatting for CLI ---
+RED = "\033[91m"
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+CYAN = "\033[96m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+# Emoji detection pattern — covers all common Unicode emoji ranges
+EMOJI_PATTERN = re.compile(
+    "[\U0001F600-\U0001F64F"   # Emoticons
+    "\U0001F300-\U0001F5FF"    # Misc Symbols & Pictographs
+    "\U0001F680-\U0001F6FF"    # Transport & Map
+    "\U0001F1E0-\U0001F1FF"    # Flags
+    "\U0001F900-\U0001F9FF"    # Supplemental Symbols
+    "\U0001FA00-\U0001FA6F"    # Chess Symbols
+    "\U0001FA70-\U0001FAFF"    # Symbols Extended-A
+    "\U00002600-\U000027BF"    # Misc symbols
+    "\U0000FE00-\U0000FE0F"    # Variation selectors
+    "\U0000200D"               # Zero-width joiner
+    "\U00002B50\U00002764\U0000203C\U00002049\U000020E3\U00002934-\U00002935\U00003030\U0000303D\U00003297\U00003299"  # Misc single chars
+    "]+", flags=re.UNICODE
+)
+
+EXCLUDE_DIRS = {
+    "node_modules", ".git", ".next", ".vite", "dist", "build",
+    "venv", ".venv", "__pycache__", ".cargo", "target"
+}
+
+TEXT_EXTENSIONS = {
+    ".html", ".htm", ".jsx", ".tsx", ".js", ".ts",
+    ".vue", ".svelte", ".json", ".md", ".css", ".py"
+}
+
+# Per-scan deduplication state — reset at start of each scan_directory call.
+# Avoids flagging the same project-level issue (e.g. "no security headers")
+# for every route file in the same project.
+_seen_project_warnings = set()
+
+# ── Shared helpers (extracted from repeated patterns in check_file_content) ──────
+
+def _line_of(content, pos):
+    """Return 1-based line number of a position in content."""
+    return content[:pos].count('\n') + 1
+
+
+def _is_comment(content, pos):
+    """True if the position is on a line that starts with a comment marker."""
+    line_start = content.rfind('\n', 0, pos) + 1
+    prefix = content[line_start:pos].strip()
+    return prefix.startswith(('//', '#', '*', '<!--'))
+
+
+def _is_test_path(file_path):
+    """True if the file path indicates test/mock/fixture code."""
+    fp_lower = str(file_path).lower()
+    return any(t in fp_lower for t in (
+        '/test/', '/tests/', '__tests__', '__mocks__',
+        '/mock/', '/fixture/', '.test.', '.spec.',
+    ))
+
+
+def _strip_comments(content):
+    """Return content with comment-only lines removed."""
+    return '\n'.join(
+        l for l in content.split('\n')
+        if not l.lstrip().startswith(('//', '#', '*', '/*'))
+    )
+
+
+def _jsx_tag_body(content, pos, max_len=512):
+    """Extract the body of a JSX/HTML tag starting at pos, tracking brace depth.
+    Returns the tag text up to the closing > (or up to max_len chars if no close found)."""
+    ahead = content[pos:pos + max_len]
+    depth = 0
+    for i, ch in enumerate(ahead):
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+        elif ch == '>' and depth == 0:
+            return ahead[:i]
+    return ahead
+
+
+def _comment_prefixes():
+    """Return the set of comment-start strings used across languages."""
+    return ('//', '#', '*', '<!--')
+
+
+class SimpleHTMLInspector(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.title = ""
+        self.in_title = False
+        self.h1_count = 0
+        self.in_h1 = False
+        self.has_meta_desc = False
+        self.has_og_image = False
+        self.has_canonical = False
+        self.has_favicon = False
+        self.is_default_favicon = False
+        self.has_lang = False
+        self.images_missing_alt = 0
+        self.broken_hash_buttons = 0
+
+    def handle_starttag(self, tag, attrs):
+        attrs_dict = dict(attrs)
+        
+        if tag == "html":
+            if "lang" in attrs_dict and attrs_dict["lang"].strip():
+                self.has_lang = True
+
+        elif tag == "title":
+            self.in_title = True
+
+        elif tag == "h1":
+            self.h1_count += 1
+            self.in_h1 = True
+
+        elif tag == "meta":
+            name = attrs_dict.get("name", "").lower()
+            prop = attrs_dict.get("property", "").lower()
+            content = attrs_dict.get("content", "").strip()
+            if name == "description" and content:
+                self.has_meta_desc = True
+            if prop == "og:image" and content:
+                self.has_og_image = True
+
+        elif tag == "link":
+            rel = attrs_dict.get("rel", "").lower()
+            href = attrs_dict.get("href", "").lower()
+            if "canonical" in rel:
+                self.has_canonical = True
+            if "icon" in rel:
+                self.has_favicon = True
+                if "vite.svg" in href or "react.svg" in href or "favicon.ico" in href:
+                    self.is_default_favicon = True
+
+        elif tag == "img":
+            alt = attrs_dict.get("alt", None)
+            if alt is None or not alt.strip():
+                self.images_missing_alt += 1
+
+        elif tag in ("a", "button"):
+            href = attrs_dict.get("href", "")
+            onclick = attrs_dict.get("onclick", "")
+            if href == "#" and not onclick:
+                self.broken_hash_buttons += 1
+
+    def handle_endtag(self, tag):
+        if tag == "title":
+            self.in_title = False
+        elif tag == "h1":
+            self.in_h1 = False
+
+    def handle_data(self, data):
+        if self.in_title:
+            self.title += data
+
+def check_file_content(file_path: Path, fix: bool = False):
+    errors = []
+    warnings = []
+    
+    try:
+        content = file_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception as e:
+        return errors, warnings
+
+    # Check 1: Em-dashes (U+2014)
+    em_dash_matches = list(re.finditer(r"—", content))
+    if em_dash_matches:
+        errors.append(f"Found {len(em_dash_matches)} em-dash ('—') character(s). Replace with comma (preferred) or standard dash '-'.")
+        if fix:
+            content = content.replace("—", ", ")
+            file_path.write_text(content, encoding="utf-8")
+            warnings.append("Auto-fixed em-dashes by replacing with commas.")
+
+    # Check 2: Hardcoded vercel.app URLs
+    if "vercel.app" in content and not file_path.name.endswith(".md"):
+        errors.append("Hardcoded 'vercel.app' URL detected in source code.")
+
+    # Check 3: Leftover AI builder watermarks
+    watermarks = ["Made with Lovable", "Created with v0", "built with bolt.new"]
+    for wm in watermarks:
+        if wm.lower() in content.lower():
+            errors.append(f"Leftover AI builder watermark detected: '{wm}'")
+
+    # Check 4: Placeholder text & fake reviews
+    placeholders = ["John Doe", "Jane Smith", "Trusted by 10,000+ creators", "Lorem ipsum"]
+    for ph in placeholders:
+        if ph in content:
+            warnings.append(f"Placeholder copy detected: '{ph}'")
+
+    # Check 5: Cursive/script font imports
+    script_fonts = ["Dancing+Script", "Pacifico", "Great+Vibes", "Satisfy", "Caveat"]
+    for font in script_fonts:
+        if font in content:
+            warnings.append(f"Cursive/script font import detected: '{font}'")
+
+    # Check 6: Unstyled <select> elements (TSX/JSX only).
+    # Native selects render browser-default chrome (arrow, focus ring, white option
+    # popup) that clashes with the dark clay/ink theme. Flag any <select that lacks
+    # a className attribute — the Select component and selectCls export from
+    # common.tsx are the intended replacements.
+    if file_path.suffix in (".tsx", ".jsx"):
+        # Look for <select tags that don't have a className attribute within
+        # reasonable distance (handles multiline JSX, arrow functions in props, etc.)
+        unstyled = []
+        for match in re.finditer(r'<\s*select\b', content):
+            pos = match.start()
+            tag_body = _jsx_tag_body(content, pos, 512)
+            if 'className' not in tag_body:
+                line_num = _line_of(content, pos)
+                if not _is_comment(content, pos):
+                    unstyled.append(str(line_num))
+        if unstyled:
+            errors.append(
+                f"Found {len(unstyled)} unstyled <select> element(s) (lines {', '.join(unstyled)}). "
+                f"Use a styled select component instead of raw <select> "
+                f"to ensure consistent theming and custom styling."
+            )
+
+    # Check 7: dangerouslySetInnerHTML (TSX/JSX only) — ERROR.
+    # AI loves to suggest this for "just inject this HTML" without understanding
+    # it's an XSS vector. There's almost always a safer alternative.
+    if file_path.suffix in (".tsx", ".jsx"):
+        if "dangerouslySetInnerHTML" in content:
+            errors.append(
+                "Found dangerouslySetInnerHTML — an XSS vector. "
+                "Use a safe renderer or properly sanitize content before injection."
+            )
+
+    # Check 8: target="_blank" without rel="noopener noreferrer" (HTML/JSX/TSX) — ERROR.
+    # AI generates this constantly; it's a security best-practice since forever.
+    if file_path.suffix in (".html", ".htm", ".tsx", ".jsx"):
+        blank_targets = list(re.finditer(
+            r'target\s*=\s*["\']_blank["\']|target\s*=\s*\{["\']_blank["\']\}',
+            content
+        ))
+        insecure = []
+        for match in blank_targets:
+            # Look for noopener within 256 chars around the match
+            start = max(0, match.start() - 32)
+            end = min(len(content), match.end() + 256)
+            window = content[start:end]
+            if 'noopener' not in window:
+                line_num = content[:match.start()].count('\n') + 1
+                insecure.append(str(line_num))
+        if insecure:
+            errors.append(
+                f"Found {len(insecure)} target=\"_blank\" link(s) without "
+                f"rel=\"noopener noreferrer\" (lines {', '.join(insecure)}). "
+                f"Add rel=\"noopener noreferrer\" to prevent tab-napping attacks."
+            )
+
+    # Check 9: console.log in frontend code (.tsx only) — WARN.
+    # Debugging artifacts shipped to users. Not a hard block because console
+    # logging has legitimate use in some cases (error reporting, dev tooling).
+    if file_path.suffix in (".tsx",):
+        log_matches = list(re.finditer(r'\bconsole\.log\b', content))
+        if log_matches:
+            lines = sorted(set(
+                str(content[:m.start()].count('\n') + 1) for m in log_matches
+            ))
+            warnings.append(
+                f"Found {len(log_matches)} console.log() call(s) (lines {', '.join(lines[:10])}"
+                f"{'...' if len(lines) > 10 else ''}). "
+                f"Remove debugging logs before shipping to production."
+            )
+
+    # Check 10: Inline style={{...}} objects (TSX/JSX only) — WARN.
+    # Bypasses Tailwind theme, creates consistency issues across the app.
+    if file_path.suffix in (".tsx", ".jsx"):
+        inline_styles = list(re.finditer(r'\bstyle\s*=\s*\{\{', content))
+        if inline_styles:
+            lines = sorted(set(
+                str(content[:m.start()].count('\n') + 1) for m in inline_styles
+            ))
+            warnings.append(
+                f"Found {len(inline_styles)} inline style={{...}} object(s) (lines {', '.join(lines[:10])}"
+                f"{'...' if len(lines) > 10 else ''}). "
+                f"Use Tailwind classes or CSS modules instead for consistent theming."
+            )
+
+    # Check 11: <img> without alt text (JSX/TSX) — ERROR.
+    # Accessibility isn't optional. The HTML parser catches this for .html files
+    # as a WARN; here we check JSX and upgrade to ERROR.
+    if file_path.suffix in (".tsx", ".jsx"):
+        imgs_missing_alt = 0
+        missing_lines = []
+        for match in re.finditer(r'<\s*img\b', content):
+            pos = match.start()
+            tag_body = _jsx_tag_body(content, pos, 512)
+            if not re.search(r'\balt\s*=', tag_body):
+                line_num = _line_of(content, pos)
+                if not _is_comment(content, pos):
+                    imgs_missing_alt += 1
+                    missing_lines.append(str(line_num))
+        if imgs_missing_alt > 0:
+            errors.append(
+                f"Found {imgs_missing_alt} <img> element(s) without alt text "
+                f"(lines {', '.join(missing_lines[:10])}"
+                f"{'...' if len(missing_lines) > 10 else ''}). "
+                f"Every image must have descriptive alt text for accessibility."
+            )
+
+    # Check 12: TODO / FIXME / HACK comments — WARN.
+    # Tech debt markers. Flag as warnings so they're visible but don't block.
+    if file_path.suffix in TEXT_EXTENSIONS:
+        markers = []
+        for match in re.finditer(r'(?://|#|/\*|\*)\s*(TODO|FIXME|HACK)\b', content):
+            line_num = content[:match.start()].count('\n') + 1
+            markers.append(f"L{line_num}:{match.group(1)}")
+        if markers:
+            warnings.append(
+                f"Found {len(markers)} tech-debt marker(s): {', '.join(markers[:8])}"
+                f"{'...' if len(markers) > 8 else ''}. "
+                f"Resolve or track these before shipping."
+            )
+
+    # Check 13: `as` type casts in TypeScript — WARN.
+    # Often used where proper type narrowing would catch edge cases. Flag patterns
+    # like `x as SomeType`, `(x as Type)`, `as string`, `as number` but NOT
+    # `as const` (which is idiomatic) or common English phrases.
+    if file_path.suffix in (".ts", ".tsx"):
+        casts = list(re.finditer(
+            r'\bas\s+([A-Z]\w+(?:\[\])?|string|number|boolean|object|any|unknown|never|void|null|undefined)\b',
+            content
+        ))
+        # Exclude `as const` (idiomatic TypeScript)
+        casts = [c for c in casts if c.group(1) != 'const']
+        if casts:
+            lines = sorted(set(
+                str(content[:c.start()].count('\n') + 1) for c in casts
+            ))
+            warnings.append(
+                f"Found {len(casts)} `as` type cast(s) (lines {', '.join(lines[:10])}"
+                f"{'...' if len(lines) > 10 else ''}). "
+                f"Prefer proper type narrowing or type guards over `as` casts "
+                f"which silently bypass type checking."
+            )
+
+    # Check 14: XSS sinks — ERROR.
+    # innerHTML/outerHTML assignments, insertAdjacentHTML, document.write,
+    # eval(), new Function(), v-html (Vue), and javascript: protocol URLs
+    # are the most common XSS vectors in vibecoded projects. Flag as ERROR
+    # because legitimate use cases are extremely rare in user-facing code.
+    if file_path.suffix in (".js", ".ts", ".tsx", ".jsx", ".vue", ".svelte", ".html", ".htm"):
+        xss_sinks = {
+            "innerHTML": [r'\.innerHTML\s*='],
+            "outerHTML": [r'\.outerHTML\s*='],
+            "insertAdjacentHTML": [r'\.insertAdjacentHTML\s*\('],
+            "document.write": [r'document\.write\s*\('],
+            "eval()": [r'\beval\s*\('],
+            "new Function()": [r'new\s+Function\s*\('],
+            "v-html (Vue)": [r'v-html\s*='],
+            "javascript: URL": [r'(?:href|src|action)\s*=\s*["\x60\'][jJ]avascript:'],
+        }
+        found = []
+        for label, patterns in xss_sinks.items():
+            for pat in patterns:
+                for m in re.finditer(pat, content):
+                    # Skip matches inside comment lines
+                    line_start = content.rfind('\n', 0, m.start()) + 1
+                    line_prefix = content[line_start:m.start()].strip()
+                    if line_prefix.startswith('//') or line_prefix.startswith('*') or line_prefix.startswith('#'):
+                        continue
+                    # Skip empty-string innerHTML/outerHTML (safe clearing pattern)
+                    if label in ("innerHTML", "outerHTML"):
+                        after = content[m.end():m.end() + 20].strip()
+                        if after.startswith("''") or after.startswith('""') or after.startswith('``'):
+                            continue
+                        # Skip if content within ~300 chars contains esc( — developer is escaping
+                        nearby = content[m.end():m.end() + 300]
+                        if 'esc(' in nearby:
+                            continue
+                        # Skip static string assignments (no template interpolation)
+                        after_trim = content[m.end():m.end() + 50].lstrip()
+                        if after_trim.startswith("'") or after_trim.startswith('"'):
+                            continue
+                        # Skip known safe renderer functions
+                        if re.match(r'[a-zA-Z_]\w*\(', after_trim):
+                            func_name = after_trim.split('(')[0]
+                            if func_name in ('renderFlags', 'render', 'format', 'sanitize', 'escapeHtml'):
+                                continue
+                    line_num = content[:m.start()].count('\n') + 1
+                    found.append(f"L{line_num}:{label}")
+        if found:
+            errors.append(
+                f"Found {len(found)} XSS sink(s): {', '.join(found[:10])}"
+                f"{'...' if len(found) > 10 else ''}. "
+                f"Replace innerHTML/outerHTML with textContent or safe DOM APIs; "
+                f"use framework templating instead of v-html/javascript: URLs."
+            )
+
+    # Check 15: File upload security gaps — WARN.
+    # Catch three common patterns: <input type="file"> without accept
+    # attribute, multer/formidable without fileFilter, and express.static
+    # mount points over upload directories.
+    if file_path.suffix in (".js", ".ts", ".tsx", ".jsx", ".html", ".htm"):
+        upload_gaps = []
+        # Pattern A: <input type="file"> without accept attribute (HTML/JSX)
+        if file_path.suffix in (".html", ".htm", ".tsx", ".jsx"):
+            for m in re.finditer(r'<\s*input\b', content):
+                pos = m.start()
+                tag_body = _jsx_tag_body(content, pos, 512)
+                if re.search(r'type\s*=\s*["\x60\']file["\x60\']', tag_body) and 'accept' not in tag_body:
+                    upload_gaps.append(f"L{_line_of(content, pos)}:file-input-no-accept")
+        # Pattern B: multer without fileFilter (Node.js)
+        if file_path.suffix in (".js", ".ts"):
+            for m in re.finditer(r'\bmulter\s*\(', content):
+                pos = m.start()
+                ahead = content[pos:pos + 1024]
+                if 'fileFilter' not in ahead and 'file_filter' not in ahead:
+                    line_num = content[:pos].count('\n') + 1
+                    upload_gaps.append(f"L{line_num}:multer-no-fileFilter")
+        # Pattern C: express.static over a path containing 'upload'
+        if file_path.suffix in (".js", ".ts"):
+            for m in re.finditer(r'\.static\s*\(', content):
+                pos = m.start()
+                ahead = content[pos:pos + 256]
+                if re.search(r'upload', ahead, re.IGNORECASE):
+                    line_num = content[:pos].count('\n') + 1
+                    upload_gaps.append(f"L{line_num}:express-static-uploads")
+        if upload_gaps:
+            warnings.append(
+                f"Found {len(upload_gaps)} file-upload security gap(s): "
+                f"{', '.join(upload_gaps[:10])}"
+                f"{'...' if len(upload_gaps) > 10 else ''}. "
+                f"Add accept attribute on file inputs, fileFilter on multer, "
+                f"and consider nosniff headers for upload directories."
+            )
+
+    # Check 16: Webhook signature verification gaps — WARN.
+    # Detect files that handle webhook routes but don't contain HMAC
+    # signature verification in the same file. This is a heuristic —
+    # verification could be in a shared middleware or imported module.
+    if file_path.suffix in (".js", ".ts", ".py"):
+        # First: is this file a webhook handler?
+        webhook_indicators = [
+            r'webhook', r'/api/webhook', r'"webhook"', r"'webhook'",
+        ]
+        route_webhook_patterns = [
+            r'(?:app|router|@app)\.(?:post|get|put|delete|use)\s*\(\s*["\x60\'][^"\x60\']*webhook',
+            r'@(?:app|router)\.(?:post|get|put|delete|route)\s*\(\s*["\x60\'][^"\x60\']*webhook',
+        ]
+        is_webhook_file = False
+        for pat in webhook_indicators:
+            if re.search(pat, content, re.IGNORECASE):
+                is_webhook_file = True
+                break
+        # Also check: does the file define a route with "webhook" in the path?
+        if not is_webhook_file:
+            for pat in route_webhook_patterns:
+                if re.search(pat, content, re.IGNORECASE):
+                    is_webhook_file = True
+                    break
+        if is_webhook_file:
+            # Verify the file contains signature verification OR alternative auth
+            sig_patterns = [
+                r'constructEvent',           # Stripe
+                r'verifySignature',          # Generic
+                r'createHmac',               # Node crypto
+                r'timingSafeEqual',          # Node crypto constant-time
+                r'\.update\(.*\)\.digest\(', # HMAC digest chain
+                r'compare_digest',           # Python hmac constant-time
+                r'hmac\.new\(',              # Python HMAC
+                r'HMAC\(',                   # Python HMAC class
+                r'signature',                # Generic (loose match)
+            ]
+            # Also accept API key / bearer token auth as valid protection
+            alt_auth_patterns = [
+                r'require_api_key',          # Custom API key dependency
+                r'require_auth',             # Generic auth dependency
+                r'api[_-]?key',              # API key reference
+                r'x-api-key',                # API key header
+                r'Depends\(',                # FastAPI dependency injection (likely auth)
+            ]
+            has_protection = (
+                any(re.search(pat, content, re.IGNORECASE) for pat in sig_patterns)
+                or any(re.search(pat, content, re.IGNORECASE) for pat in alt_auth_patterns)
+            )
+            if not has_protection:
+                first_route = None
+                for pat in route_webhook_patterns:
+                    m = re.search(pat, content, re.IGNORECASE)
+                    if m:
+                        first_route = content[:m.start()].count('\n') + 1
+                        break
+                loc = f" (first route near line {first_route})" if first_route else ""
+                warnings.append(
+                    f"Webhook handler detected but no HMAC signature verification "
+                    f"found in the same file{loc}. Unsigned webhooks accept arbitrary "
+                    f"events from anyone. Add HMAC signature verification using "
+                    f"crypto.timingSafeEqual (Node) or hmac.compare_digest (Python)."
+                )
+
+    # Check 17: Hardcoded secrets — ERROR.
+    # AI assistants inline API keys, DB credentials, and access tokens from
+    # tutorial patterns in training data. Apiiro data shows AI-assisted devs
+    # expose cloud credentials at nearly 2x the rate of non-AI devs.
+    if file_path.suffix in TEXT_EXTENSIONS:
+        secret_patterns = [
+            ("Stripe live key", r'(?:sk|pk)_live_[0-9a-zA-Z]{24,}'),
+            ("Stripe test key", r'(?:sk|pk)_test_[0-9a-zA-Z]{24,}'),
+            ("AWS access key", r'AKIA[0-9A-Z]{16}'),
+            ("private key block", r'-----BEGIN (?:RSA|EC|DSA|OPENSSH) PRIVATE KEY-----'),
+            ("OpenAI API key", r'sk-proj-[0-9a-zA-Z_-]{20,}'),
+            ("Anthropic API key", r'sk-ant-(?:api|admin)[0-9a-zA-Z_-]{20,}'),
+            ("GitHub token", r'gh[pousr]_[A-Za-z0-9_]{36}'),
+            ("SendGrid API key", r'SG\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}'),
+            ("password assignment", r'password\s*[:=]\s*["\'][^"\']{4,}["\']'),
+            ("secret assignment", r'secret\s*[:=]\s*["\'][^"\']{8,}["\']'),
+            ("API key assignment", r'api[_-]?key\s*[:=]\s*["\'][^"\']{8,}["\']'),
+            ("JWT secret", r'JWT_SECRET\s*[:=]\s*["\'][^"\']{4,}["\']'),
+            ("token assignment", r'token\s*[:=]\s*["\'][A-Za-z0-9+/=]{20,}["\']'),
+        ]
+        found_secrets = []
+        is_test_file = _is_test_path(file_path)
+        is_md = file_path.suffix == '.md'
+        for label, pattern in secret_patterns:
+            for m in re.finditer(pattern, content, re.IGNORECASE):
+                pos = m.start()
+                line_num = content[:pos].count('\n') + 1
+                # Skip comment lines
+                line_start = content.rfind('\n', 0, pos) + 1
+                line_prefix = content[line_start:pos].strip()
+                if line_prefix.startswith('//') or line_prefix.startswith('#') or line_prefix.startswith('*') or line_prefix.startswith('<!--'):
+                    continue
+                if is_test_file or is_md:
+                    continue
+                # For assignment patterns: check value is not from env, not a placeholder
+                if label in ("password assignment", "secret assignment", "API key assignment", "JWT secret", "token assignment"):
+                    nearby = content[max(0, pos-20):pos+100]
+                    if any(ref in nearby for ref in ('process.env', 'os.environ', 'import.meta.env', 'Deno.env', 'process.env[')):
+                        continue
+                    val_m = re.search(r'["\']([^"\']{4,})["\']', content[pos:pos+80])
+                    if val_m:
+                        val_lower = val_m.group(1).lower()
+                        if any(p in val_lower for p in ('changeme', 'your-', 'replace', 'xxx', 'todo',
+                                                          'example', 'your_api_key', 'YOUR_', 'placeholder', 'dummy')):
+                            continue
+                if label == "password assignment":
+                    pw_m = re.search(r'password\s*[:=]\s*["\']([^"\']*)["\']', content[pos:pos+60])
+                    if pw_m and not pw_m.group(1).strip():
+                        continue
+                found_secrets.append(f"L{line_num}:{label}")
+        # DB connection strings with embedded credentials
+        # Only match known database URL schemes to avoid false positives on
+        # Google Fonts URLs and other web resources with @ signs in params.
+        if not is_md:
+            db_schemes = r'(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp|mqtt|sqlserver|oracle|mariadb)'
+            for m in re.finditer(rf'({db_schemes})://([^:@\s]{{1,64}}):([^@\s]{{1,128}})@', content, re.IGNORECASE):
+                pos = m.start()
+                line_start = content.rfind('\n', 0, pos) + 1
+                line_prefix = content[line_start:pos].strip()
+                if line_prefix.startswith('//') or line_prefix.startswith('#') or line_prefix.startswith('*'):
+                    continue
+                nearby_db = content[max(0, pos-30):pos+120]
+                if any(ref in nearby_db for ref in ('process.env', 'os.environ', 'import.meta.env')):
+                    continue
+                after_db = content[m.end():m.end()+50]
+                if re.match(r'(localhost|127\.0\.0\.1|0\.0\.0\.0)', after_db):
+                    continue
+                line_num = content[:pos].count('\n') + 1
+                found_secrets.append(f"L{line_num}:DB-credentials-in-URL")
+        if found_secrets:
+            errors.append(
+                f"Found {len(found_secrets)} hardcoded secret(s): "
+                f"{', '.join(found_secrets[:10])}"
+                f"{'...' if len(found_secrets) > 10 else ''}. "
+                f"Move secrets to environment variables or a secrets manager, "
+                f"and rotate any exposed credentials immediately."
+            )
+
+    # Check 18: Broken JWT validation — ERROR.
+    # AI assistants copy the shortest jwt.decode() call from docs, which often
+    # omits algorithm pinning. Explicitly disabled verification and alg:none
+    # acceptance are common.
+    if file_path.suffix in (".js", ".ts", ".py"):
+        jwt_errors = []
+        jwt_warns = []
+        jwt_is_test = _is_test_path(file_path)
+        # Python: PyJWT misconfigurations
+        if file_path.suffix == ".py":
+            # ERROR: explicitly disabled verification
+            for pat, label in [
+                (r'\bverify\s*=\s*False\b', 'verify=False'),
+                (r'["\']verify_signature["\']\s*:\s*False', 'verify_signature disabled'),
+                (r'\balgorithms\s*=\s*\[["\']none["\']\]', 'algorithms=["none"]'),
+                (r'\balgorithms\s*=\s*\[["\']None["\']\]', 'algorithms=["None"]'),
+            ]:
+                for m in re.finditer(pat, content, re.IGNORECASE):
+                    line_start = content.rfind('\n', 0, m.start()) + 1
+                    line_prefix = content[line_start:m.start()].strip()
+                    if line_prefix.startswith('#'):
+                        continue
+                    if jwt_is_test:
+                        continue
+                    ln = content[:m.start()].count('\n') + 1
+                    jwt_errors.append(f"L{ln}:{label}")
+            # WARN: jwt.decode with 2 positional args and no algorithms=
+            for m in re.finditer(r'\bjwt\.decode\s*\(', content):
+                pos = m.start()
+                line_start = content.rfind('\n', 0, pos) + 1
+                if content[line_start:pos].strip().startswith('#'):
+                    continue
+                if jwt_is_test:
+                    continue
+                # Find closing paren with brace tracking
+                depth = 0
+                call_text = ""
+                for i, ch in enumerate(content[pos:]):
+                    if ch == '(':
+                        depth += 1
+                    elif ch == ')':
+                        depth -= 1
+                        if depth == 0:
+                            call_text = content[pos:pos+i+1]
+                            break
+                if 'algorithms=' not in call_text:
+                    # Count positional args before first keyword arg
+                    args_part = call_text.split('(')[1]
+                    # Rough: count commas not inside brackets/parens before first =
+                    comma_positions = []
+                    bdepth = 0
+                    for i, ch in enumerate(args_part):
+                        if ch in '([{':
+                            bdepth += 1
+                        elif ch in ')]}':
+                            bdepth -= 1
+                        elif ch == ',' and bdepth == 0:
+                            comma_positions.append(i)
+                        elif ch == '=' and bdepth == 0:
+                            break
+                    pos_args = len(comma_positions) + 1 if args_part.strip()[:-1].strip() else 0
+                    if pos_args <= 2:
+                        ln = content[:pos].count('\n') + 1
+                        jwt_warns.append(f"L{ln}:jwt.decode-no-algorithms")
+        # JavaScript: jsonwebtoken misconfigurations
+        if file_path.suffix in (".js", ".ts"):
+            for pat, label in [
+                (r'\balgorithms\s*:\s*\[["\']none["\']\]', 'algorithms:["none"]'),
+                (r'\bignoreExpiration\s*:\s*true\b', 'ignoreExpiration:true'),
+                (r'\bjwt\.decode\s*\(', 'jwt.decode (no verify)'),
+            ]:
+                for m in re.finditer(pat, content, re.IGNORECASE):
+                    line_start = content.rfind('\n', 0, m.start()) + 1
+                    line_prefix = content[line_start:m.start()].strip()
+                    if line_prefix.startswith('//') or line_prefix.startswith('*'):
+                        continue
+                    if jwt_is_test:
+                        continue
+                    ln = content[:m.start()].count('\n') + 1
+                    if label == 'jwt.decode (no verify)':
+                        jwt_warns.append(f"L{ln}:{label}")
+                    else:
+                        jwt_errors.append(f"L{ln}:{label}")
+        if jwt_errors:
+            errors.append(
+                f"Found {len(jwt_errors)} broken JWT validation(s): "
+                f"{', '.join(jwt_errors[:8])}"
+                f"{'...' if len(jwt_errors) > 8 else ''}. "
+                f"Always verify JWT signatures with an explicit algorithm allowlist "
+                f"(e.g. algorithms=['RS256']). Never accept alg:none."
+            )
+        if jwt_warns:
+            warnings.append(
+                f"Found {len(jwt_warns)} potentially insecure JWT pattern(s): "
+                f"{', '.join(jwt_warns[:8])}"
+                f"{'...' if len(jwt_warns) > 8 else ''}. "
+                f"Use jwt.verify() (not jwt.decode()) and pin algorithm allowlists."
+            )
+
+    # Check 19: Debug mode enabled — WARN.
+    # AI generates config with DEBUG=True from templates, never changes it before
+    # deploy. Django debug console, Flask debugger, and Express stack traces all
+    # leak secrets and sometimes allow code execution.
+    if file_path.suffix in (".js", ".ts", ".py"):
+        debug_found = []
+        dbg_is_test = _is_test_path(file_path)
+        if dbg_is_test:
+            pass  # skip test files entirely
+        elif file_path.suffix == ".py":
+            for pat, label in [
+                (r'\bDEBUG\s*=\s*True\b', 'DEBUG=True'),
+                (r'\bdebug\s*=\s*True\b', 'debug=True'),
+                (r'\bAPP_DEBUG\s*=\s*True\b', 'APP_DEBUG=True'),
+                (r'\bFLASK_DEBUG\s*=\s*True\b', 'FLASK_DEBUG=True'),
+                (r'\bDJANGO_DEBUG\s*=\s*True\b', 'DJANGO_DEBUG=True'),
+            ]:
+                for m in re.finditer(pat, content):
+                    pos = m.start()
+                    line_start = content.rfind('\n', 0, pos) + 1
+                    line_prefix = content[line_start:pos].strip()
+                    if line_prefix.startswith('#'):
+                        continue
+                    # Skip if guarded by __name__ == "__main__" within 5 lines
+                    before_lines = content[max(0, line_start-200):pos].split('\n')
+                    recent = '\n'.join(before_lines[-6:])
+                    if '__name__' in recent and '__main__' in recent:
+                        continue
+                    # Skip if reading from env (not setting)
+                    if label in ('DEBUG=True', 'APP_DEBUG=True'):
+                        nearby = content[max(0, pos-30):pos]
+                        if 'os.environ.get' in nearby or 'os.getenv' in nearby:
+                            continue
+                    ln = content[:pos].count('\n') + 1
+                    debug_found.append(f"L{ln}:{label}")
+        elif file_path.suffix in (".js", ".ts"):
+            for pat, label in [
+                (r"\bNODE_ENV\s*[:=]\s*['\"]development['\"]", "NODE_ENV=development"),
+                (r"\bprocess\.env\.NODE_ENV\s*=\s*['\"]development['\"]", "NODE_ENV=development"),
+            ]:
+                for m in re.finditer(pat, content):
+                    line_start = content.rfind('\n', 0, m.start()) + 1
+                    line_prefix = content[line_start:m.start()].strip()
+                    if line_prefix.startswith('//') or line_prefix.startswith('*'):
+                        continue
+                    ln = content[:m.start()].count('\n') + 1
+                    debug_found.append(f"L{ln}:{label}")
+        if debug_found:
+            warnings.append(
+                f"Found {len(debug_found)} debug-mode indicator(s): "
+                f"{', '.join(debug_found[:8])}"
+                f"{'...' if len(debug_found) > 8 else ''}. "
+                f"Disable debug mode in production — debug consoles expose "
+                f"interactive code execution and stack traces with secrets."
+            )
+
+    # Check 20: Unsafe deserialization — ERROR.
+    # pickle.loads(), yaml.load() without SafeLoader, and similar functions
+    # execute arbitrary code on untrusted input. AI reproduces the shortest
+    # call signature from docs, which is the unsafe one.
+    if file_path.suffix in (".py", ".js", ".ts"):
+        deser_found = []
+        deser_is_test = _is_test_path(file_path)
+        if file_path.suffix == ".py":
+            deser_pats = [
+                (r'\bpickle\.loads?\s*\(', 'pickle.loads/load'),
+                (r'\bmarshal\.loads?\s*\(', 'marshal.loads'),
+                (r'\bdill\.loads?\s*\(', 'dill.loads'),
+                (r'\btorch\.load\s*\(', 'torch.load'),
+                (r'\byaml\.load\s*\(', 'yaml.load'),
+            ]
+            for pat, label in deser_pats:
+                for m in re.finditer(pat, content):
+                    pos = m.start()
+                    line_start = content.rfind('\n', 0, pos) + 1
+                    line_prefix = content[line_start:pos].strip()
+                    if line_prefix.startswith('#'):
+                        continue
+                    if deser_is_test:
+                        continue
+                    if label == 'yaml.load':
+                        nearby = content[pos:pos+200]
+                        if 'SafeLoader' in nearby or 'CSafeLoader' in nearby:
+                            continue
+                    if label == 'torch.load':
+                        nearby = content[pos:pos+200]
+                        if 'weights_only' in nearby:
+                            continue
+                    ln = content[:pos].count('\n') + 1
+                    deser_found.append(f"L{ln}:{label}")
+        elif file_path.suffix in (".js", ".ts"):
+            for m in re.finditer(r'\bvm\.runInNewContext\s*\(', content):
+                pos = m.start()
+                line_start = content.rfind('\n', 0, pos) + 1
+                if content[line_start:pos].strip().startswith('//'):
+                    continue
+                if deser_is_test:
+                    continue
+                ln = content[:pos].count('\n') + 1
+                deser_found.append(f"L{ln}:vm.runInNewContext")
+        if deser_found:
+            errors.append(
+                f"Found {len(deser_found)} unsafe deserialization call(s): "
+                f"{', '.join(deser_found[:8])}"
+                f"{'...' if len(deser_found) > 8 else ''}. "
+                f"Use safe parsers: yaml.safe_load(), json.loads(), or isolated "
+                f"execution. pickle.loads() on untrusted input is remote code execution."
+            )
+
+    # Check 21: Math.random() in security-sensitive contexts — WARN.
+    # Math.random() is not cryptographically secure. AI assistants frequently
+    # reach for it when generating tokens, reset codes, or session IDs because
+    # pre-crypto-API patterns dominate training data.
+    if file_path.suffix in (".js", ".ts", ".tsx", ".jsx", ".html", ".htm"):
+        rand_is_test = _is_test_path(file_path)
+        if not rand_is_test:
+            security_keywords = [
+                'token', 'reset', 'auth', 'password', 'secret', 'session',
+                'apiKey', 'api_key', 'csrf', 'nonce', 'otp', 'verify',
+                'hash', 'uuid', 'identifier', 'credential', 'code',
+            ]
+            rand_found = []
+            seen_lines = set()
+            for m in re.finditer(r'\bMath\.random\s*\(\s*\)', content):
+                pos = m.start()
+                line_start = content.rfind('\n', 0, pos) + 1
+                line_prefix = content[line_start:pos].strip()
+                if line_prefix.startswith('//') or line_prefix.startswith('*'):
+                    continue
+                line_num = content[:pos].count('\n') + 1
+                if line_num in seen_lines:
+                    continue
+                # Check ±2 lines for security keywords
+                ctx_start = max(0, line_start - 1)
+                ctx_end = min(len(content), content.find('\n', content.find('\n', pos) + 1) + 1)
+                if ctx_end <= 0:
+                    ctx_end = min(len(content), pos + 200)
+                # Expand: get line before and line after
+                line_before_start = content.rfind('\n', 0, line_start - 1) + 1 if line_start > 1 else 0
+                line_after_end = content.find('\n', pos)
+                line_after_end2 = content.find('\n', line_after_end + 1) if line_after_end >= 0 else len(content)
+                context_window = content[max(0, line_before_start-1):min(len(content), line_after_end2+1)]
+                # Find which keywords appear.
+                # Use lookbehind/ahead instead of \b to handle camelCase
+                # (e.g. "reset" matches inside "resetToken" since T is uppercase).
+                hits = []
+                for kw in security_keywords:
+                    # Match keyword preceded by non-alpha (or start) and not followed
+                    # by lowercase (allows camelCase like resetToken, blocks encodeURI)
+                    pat = r'(?<![a-zA-Z])' + re.escape(kw) + r'(?![a-z])'
+                    if re.search(pat, context_window, re.IGNORECASE):
+                        hits.append(kw)
+                if hits:
+                    # Skip if same line has crypto API usage (dev chose Math.random intentionally)
+                    line_text = content[line_start:content.find('\n', pos)] if content.find('\n', pos) >= 0 else content[line_start:]
+                    if 'crypto.randomUUID' in line_text or 'crypto.getRandomValues' in line_text:
+                        continue
+                    seen_lines.add(line_num)
+                    rand_found.append(f"L{line_num}:near-{hits[0]}")
+            if rand_found:
+                warnings.append(
+                    f"Found {len(rand_found)} Math.random() in security-sensitive context(s): "
+                    f"{', '.join(rand_found[:8])}"
+                    f"{'...' if len(rand_found) > 8 else ''}. "
+                    f"Math.random() is not cryptographically secure. "
+                    f"Use crypto.randomUUID() or crypto.getRandomValues() instead."
+                )
+
+    # Check 22: Missing security headers — WARN.
+    # AI generates route handlers and page templates but omits security headers
+    # like CSP, HSTS, X-Frame-Options. In one study, zero of five AI-built apps
+    # had any security headers configured.
+    if file_path.suffix in (".js", ".ts", ".py"):
+        hdr_is_test = _is_test_path(file_path)
+        if not hdr_is_test:
+            # Strip comments to avoid matching comment lines
+            content_nc = _strip_comments(content)
+            header_gap = None
+            if file_path.suffix in (".js", ".ts"):
+                has_express = bool(re.search(r'(?:express\(\)|require\(["\']express["\']\)|from\s+["\']express["\'])', content_nc))
+                has_routes = bool(re.search(r'\b(?:app|router)\.(?:get|post|put|delete|patch|use)\s*\(', content_nc))
+                has_helmet = 'helmet' in content_nc
+                if has_express and has_routes and not has_helmet:
+                    header_gap = "Express"
+            elif file_path.suffix == ".py":
+                has_flask = bool(re.search(r'\bFlask\s*\(\s*__name__', content_nc))
+                has_fastapi = 'FastAPI(' in content_nc
+                has_routes_py = bool(re.search(r'@(?:app|router)\.(?:route|get|post|put|delete|patch)\s*\(', content_nc))
+                has_security_py = bool(re.search(r'\b(Talisman|Secure\s*\(|secure_headers|SecurityMiddleware)', content_nc))
+                if has_flask and has_routes_py and not has_security_py:
+                    header_gap = "Flask"
+                elif has_fastapi and has_routes_py and not has_security_py:
+                    header_gap = "FastAPI"
+            if header_gap:
+                # Deduplicate: only one warning per framework per project
+                gap_key = f"sec-headers-{header_gap}"
+                if gap_key not in _seen_project_warnings:
+                    _seen_project_warnings.add(gap_key)
+                    warnings.append(
+                        f"{header_gap} server detected but no security headers "
+                        f"middleware found (helmet/Talisman/Secure). Add CSP, HSTS, "
+                        f"X-Frame-Options, and X-Content-Type-Options headers."
+                    )
+
+    # Check 23: Potential SSRF via unfiltered user URLs — WARN.
+    # URL preview, webhook registration, and image import features often pass
+    # user-supplied URLs directly to fetch/axios/requests. AI tools rarely add
+    # URL validation or hostname allowlists unless explicitly prompted.
+    if file_path.suffix in (".js", ".ts", ".py"):
+        ssrf_is_test = _is_test_path(file_path)
+        if not ssrf_is_test:
+            ssrf_found = []
+            # JS/TS: fetch/axios with user-supplied URL
+            if file_path.suffix in (".js", ".ts"):
+                url_param_names = ['url', 'uri', 'link', 'href', 'src', 'target',
+                                   'redirect', 'callback', 'webhook', 'endpoint', 'path', 'resource']
+                for client in ('fetch', 'axios\.get', 'axios\.post', 'axios\(', 'got\(', 'nodeFetch\('):
+                    for param in url_param_names:
+                        pat = rf'\b{client}\s*\(?\s*(?:req|request)\.(?:query|params|body)\.{param}\b'
+                        for m in re.finditer(pat, content):
+                            pos = m.start()
+                            line_start = content.rfind('\n', 0, pos) + 1
+                            if content[line_start:pos].strip().startswith('//') or content[line_start:pos].strip().startswith('*'):
+                                continue
+                            # Check for URL validation nearby
+                            ctx = content[max(0, pos-50):pos+200]
+                            validation_signal = any(v in ctx for v in ('new URL(', 'urlparse', 'is_valid_url',
+                                                   'ALLOWED_HOSTS', 'allowed_hosts', 'allowed_domains', 'urlValidator'))
+                            if not validation_signal:
+                                ln = content[:pos].count('\n') + 1
+                                ssrf_found.append(f"L{ln}:{client.split('(')[0]}-from-request")
+                                break  # one match per client/param pair
+            # Python: requests/httpx/urllib with user-supplied URL
+            if file_path.suffix == ".py":
+                for client_pat in [
+                    r'\brequests\.(?:get|post|put|delete|patch|head)\s*\(',
+                    r'\bhttpx\.(?:get|post|put|delete)\s*\(',
+                    r'\burllib\.request\.urlopen\s*\(',
+                ]:
+                    for m in re.finditer(client_pat, content):
+                        pos = m.start()
+                        line_start = content.rfind('\n', 0, pos) + 1
+                        if content[line_start:pos].strip().startswith('#'):
+                            continue
+                        # Check if request data flows into URL position
+                        nearby_ssrf = content[pos:pos+200]
+                        if re.search(r'request\.(?:args|form|json|data)\.(?:get|get\(|\[)', nearby_ssrf) or \
+                           re.search(r'url\s*=\s*request\.', nearby_ssrf):
+                            # Check for URL validation
+                            ctx2 = content[max(0, pos-50):pos+250]
+                            if not any(v in ctx2 for v in ('urlparse', 'is_valid_url', 'ALLOWED_HOSTS',
+                                                            'allowed_hosts', 'allowed_domains')):
+                                ln = content[:pos].count('\n') + 1
+                                client_name = re.match(r'\b(\w+(?:\.\w+)*)', client_pat.strip(r'\b').lstrip('\\b'))
+                                ssrf_found.append(f"L{ln}:{client_name.group(1)}-from-request")
+            if ssrf_found:
+                warnings.append(
+                    f"Found {len(ssrf_found)} potential SSRF vector(s): "
+                    f"{', '.join(ssrf_found[:8])}"
+                    f"{'...' if len(ssrf_found) > 8 else ''}. "
+                    f"Validate and sanitize all user-supplied URLs, or use an "
+                    f"allowlist of permitted hosts. User-controlled URLs can access "
+                    f"internal services and cloud metadata endpoints."
+                )
+
+    # Check 24: No rate limiting configured — WARN.
+    # Resource exhaustion was the #1 flaw in Xint.io's 434-flaw audit (93 issues).
+    # AI codes happy-path handlers; rate limiting is infrastructure it never adds
+    # unless explicitly prompted.
+    if file_path.suffix in (".js", ".ts", ".py"):
+        rl_is_test = _is_test_path(file_path)
+        if not rl_is_test:
+            # Strip comments to avoid matching comment lines
+            rl_content = _strip_comments(content)
+            rl_gap = None
+            if file_path.suffix in (".js", ".ts"):
+                has_express_rl = bool(re.search(r'(?:express\(\)|require\(["\']express["\']\)|from\s+["\']express["\'])', rl_content))
+                has_routes_rl = bool(re.search(r'\b(?:app|router)\.(?:get|post|put|delete|patch)\s*\(', rl_content))
+                has_rate_limit = bool(re.search(r'\b(?:rateLimit|express-rate-limit|rate-limiter-flexible|express-slow-down)\b', rl_content))
+                if has_express_rl and has_routes_rl and not has_rate_limit and len(content) > 500:
+                    rl_gap = "Express"
+            elif file_path.suffix == ".py":
+                has_fastapi_rl = 'FastAPI(' in rl_content
+                has_flask_rl = bool(re.search(r'\bFlask\s*\(\s*__name__', rl_content))
+                has_routes_rl_py = bool(re.search(r'@(?:app|router)\.(?:route|get|post|put|delete|patch)\s*\(', rl_content))
+                has_rate_limit_py = bool(re.search(r'\b(?:slowapi|Limiter|RateLimiter|flask-limiter|rate_limit)\b', rl_content))
+                if (has_fastapi_rl or has_flask_rl) and has_routes_rl_py and not has_rate_limit_py and len(content) > 500:
+                    rl_gap = "FastAPI" if has_fastapi_rl else "Flask"
+            if rl_gap:
+                rl_key = f"rate-limit-{rl_gap}"
+                if rl_key not in _seen_project_warnings:
+                    _seen_project_warnings.add(rl_key)
+                    warnings.append(
+                        f"No rate limiting middleware detected in {rl_gap} server. "
+                        f"Add rate limiting (express-rate-limit / slowapi / flask-limiter) "
+                        f"to prevent brute-force, credential stuffing, and resource exhaustion attacks."
+                    )
+
+    return errors, warnings
+
+def check_html_file(file_path: Path, is_prod: bool = False):
+    errors = []
+    warnings = []
+    
+    try:
+        content = file_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return errors, warnings
+
+    parser = SimpleHTMLInspector()
+    try:
+        parser.feed(content)
+    except Exception as e:
+        warnings.append(f"HTML parsing failed: {e}")
+        return errors, warnings
+
+    # Default Vite + React title check
+    if "vite + react" in parser.title.lower():
+        errors.append(f"Default framework page title detected: '{parser.title.strip()}'")
+
+    # Emoji check — strip script/style/svg blocks to avoid false positives in data URIs
+    text_only = re.sub(r"<(script|style|svg)\b[^>]*>.*?</\1>", "", content, flags=re.DOTALL | re.IGNORECASE)
+    text_only = re.sub(r"<[^>]+>", "", text_only)  # Strip all remaining HTML tags
+    emoji_matches = EMOJI_PATTERN.findall(text_only)
+    if emoji_matches:
+        unique = list(dict.fromkeys(emoji_matches))[:5]  # First 5 unique
+        shown = " ".join(unique)
+        if len(emoji_matches) > 5:
+            shown += f" (+{len(emoji_matches) - 5} more)"
+        errors.append(f"Emoji characters found in content ({len(emoji_matches)} total): {shown}. Use SVG icons instead.")
+
+    # Title length check (rule 24: max 24 chars, ideal 12-18)
+    title_stripped = parser.title.strip()
+    if len(title_stripped) > 24:
+        errors.append(
+            f"Page title too long ({len(title_stripped)} chars): '{title_stripped}'. "
+            f"Keep titles under 24 characters (ideal 12-18). Browser tabs truncate at ~26."
+        )
+
+    # Heading hierarchy check
+    if parser.h1_count == 0:
+        errors.append("Missing <h1> primary heading element.")
+    elif parser.h1_count > 1:
+        warnings.append(f"Multiple <h1> elements found ({parser.h1_count}). Consider using a single <h1> per page.")
+
+    # Missing alt text
+    if parser.images_missing_alt > 0:
+        errors.append(f"Found {parser.images_missing_alt} <img> element(s) with missing or empty alt text.")
+
+    # Broken '#' buttons
+    if parser.broken_hash_buttons > 0:
+        errors.append(f"Found {parser.broken_hash_buttons} interactive button/link(s) with dead href='#' target.")
+
+    # SEO & Metadata
+    if not parser.has_lang:
+        errors.append("Missing 'lang' attribute on <html> element.")
+
+    if not parser.has_meta_desc:
+        if is_prod:
+            errors.append("Missing <meta name='description'> tag.")
+        else:
+            warnings.append("Missing <meta name='description'> tag.")
+
+    if not parser.has_og_image:
+        warnings.append("Missing <meta property='og:image'> social preview tag.")
+
+    if not parser.has_favicon:
+        errors.append("Missing <link rel='icon'> favicon tag.")
+    elif parser.is_default_favicon:
+        errors.append("Default Vite/React framework favicon detected ('vite.svg' or default placeholder icon). Replace with a custom project icon.")
+
+    if is_prod and not parser.has_canonical:
+        warnings.append("Missing <link rel='canonical'> tag.")
+
+    return errors, warnings
+
+def scan_directory(target_dir: Path, is_prod: bool = False, fix: bool = False,
+                   changed_only: bool = False, use_cache: bool = True):
+    print(f"\n{BOLD}{CYAN}🔍 Running Vibe-Check on:{RESET} {target_dir.resolve()}\n")
+
+    # Reset per-scan deduplication state
+    global _seen_project_warnings
+    _seen_project_warnings = set()
+
+    total_errors = 0
+    total_warnings = 0
+    scanned_files = 0
+
+    # ── Cache ──────────────────────────────────────────────────────────────────
+    cache_path = target_dir / ".vibe-check-cache.json"
+    cache = {}
+    if use_cache:
+        try:
+            if cache_path.exists():
+                cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        except Exception:
+            cache = {}
+
+    # ── Git-aware file list (--changed) ────────────────────────────────────────
+    changed_file_set = None
+    if changed_only:
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--name-only", "--diff-filter=ACM", "HEAD"],
+                capture_output=True, text=True, cwd=str(target_dir), timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                changed_file_set = set()
+                for line in result.stdout.strip().split('\n'):
+                    p = (target_dir / line.strip()).resolve()
+                    if p.is_file():
+                        changed_file_set.add(str(p))
+                print(f"  {CYAN}git-aware:{RESET} {len(changed_file_set)} changed file(s) detected")
+            else:
+                print(f"  {YELLOW}git-aware:{RESET} no changes or not a repo — falling back to full scan")
+        except Exception:
+            print(f"  {YELLOW}git-aware:{RESET} git not available — falling back to full scan")
+
+    # ── File walking ───────────────────────────────────────────────────────────
+    has_privacy = False
+    has_terms = False
+    has_sitemap = False
+    has_llms_txt = False
+
+    for root, dirs, files in os.walk(target_dir):
+        dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS and not d.startswith(".")]
+
+        for file in files:
+            file_path = Path(root) / file
+            rel_path = file_path.relative_to(target_dir)
+
+            # Check structural files
+            file_lower = file.lower()
+            if "privacy" in file_lower:
+                has_privacy = True
+            if "terms" in file_lower or "toc" in file_lower:
+                has_terms = True
+            if file_lower == "sitemap.xml":
+                has_sitemap = True
+            if file_lower == "llms.txt":
+                has_llms_txt = True
+
+            # Check exposed source maps
+            if file.endswith(".map") and ("dist" in str(rel_path) or "public" in str(rel_path)):
+                print(f"{RED}✖ [ERROR]{RESET} {rel_path}: Exposed source map file in production build output.")
+                total_errors += 1
+
+            if file_path.suffix not in TEXT_EXTENSIONS:
+                continue
+
+            # Git-aware filtering: skip unchanged files when --changed is active
+            if changed_file_set is not None and str(file_path.resolve()) not in changed_file_set:
+                continue
+
+            # Cache check: skip files whose hash hasn't changed
+            file_hash = None
+            if use_cache and not fix:
+                try:
+                    file_hash = hashlib.sha256(file_path.read_bytes()).hexdigest()
+                except Exception:
+                    pass
+                if file_hash and cache.get(str(file_path)) == file_hash:
+                    continue  # unchanged
+
+            scanned_files += 1
+
+            # Content checks
+            content_errors, content_warnings = check_file_content(file_path, fix=fix)
+            
+            # HTML specific checks
+            html_errors, html_warnings = [], []
+            if file_path.suffix in (".html", ".htm"):
+                html_errors, html_warnings = check_html_file(file_path, is_prod=is_prod)
+
+            file_errors = content_errors + html_errors
+            file_warnings = content_warnings + html_warnings
+
+            if file_errors or file_warnings:
+                print(f"{BOLD}📄 {rel_path}{RESET}")
+                for err in file_errors:
+                    print(f"  {RED}✖ [ERROR]{RESET} {err}")
+                    total_errors += 1
+                for warn in file_warnings:
+                    print(f"  {YELLOW}⚠ [WARN]{RESET}  {warn}")
+                    total_warnings += 1
+
+            # Update cache with this file's hash so it's skipped next run if unchanged
+            if use_cache and file_hash:
+                cache[str(file_path)] = file_hash
+
+    # ── Save cache ──────────────────────────────────────────────────────────
+    if use_cache:
+        try:
+            cache_path.write_text(json.dumps(cache), encoding="utf-8")
+        except Exception:
+            pass
+
+    # Situational checks
+    if is_prod:
+        print(f"\n{BOLD}🌐 Production Mode Checks:{RESET}")
+        if not has_privacy:
+            print(f"  {YELLOW}⚠ [WARN]{RESET}  No Privacy Policy file/route detected.")
+            total_warnings += 1
+        if not has_terms:
+            print(f"  {YELLOW}⚠ [WARN]{RESET}  No Terms & Conditions file/route detected.")
+            total_warnings += 1
+        if not has_sitemap:
+            print(f"  {YELLOW}⚠ [WARN]{RESET}  No sitemap.xml detected.")
+            total_warnings += 1
+        if not has_llms_txt:
+            print(f"  {YELLOW}⚠ [WARN]{RESET}  No llms.txt detected.")
+            total_warnings += 1
+
+    # Project-level webhook signature verification check.
+    # If any file in the project is a webhook handler but NO file
+    # in the project contains signature verification, warn.
+    webhook_files_found = []
+    verification_files_found = []
+    for root, dirs, files in os.walk(target_dir):
+        dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS and not d.startswith(".")]
+        for file in files:
+            fp = Path(root) / file
+            if fp.suffix not in TEXT_EXTENSIONS:
+                continue
+            try:
+                fc = fp.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+            # Check for webhook route patterns
+            if any(re.search(pat, fc, re.IGNORECASE) for pat in [
+                r'(?:app|router|@app)\.(?:post|get|put|delete|use)\s*\(\s*["\x60\'][^"\x60\']*webhook',
+                r'@(?:app|router)\.(?:post|get|put|delete|route)\s*\(\s*["\x60\'][^"\x60\']*webhook',
+            ]):
+                webhook_files_found.append(fp)
+            # Check for signature verification (collected from any file)
+            if any(re.search(pat, fc, re.IGNORECASE) for pat in [
+                r'constructEvent', r'timingSafeEqual', r'compare_digest',
+                r'createHmac.*update.*digest', r'hmac\.new\(.*digest',
+            ]):
+                verification_files_found.append(fp)
+
+    if webhook_files_found and not verification_files_found:
+        print(f"\n{BOLD}🔒 Security Checks:{RESET}")
+        print(f"  {YELLOW}⚠ [WARN]{RESET}  Project has {len(webhook_files_found)} webhook handler(s) but no HMAC signature verification found anywhere in the project.")
+        total_warnings += 1
+
+    print(f"\n{BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}")
+    print(f"Scanned {scanned_files} file(s).")
+    
+    if total_errors > 0:
+        print(f"{RED}{BOLD}FAILED:{RESET} {total_errors} error(s), {total_warnings} warning(s) found.\n")
+        sys.exit(1)
+    elif total_warnings > 0:
+        print(f"{YELLOW}{BOLD}PASSED WITH WARNINGS:{RESET} {total_warnings} warning(s).\n")
+        sys.exit(0)
+    else:
+        print(f"{GREEN}{BOLD}PASSED:{RESET} 100% Clean! Zero anti-slop red flags found.\n")
+        sys.exit(0)
+
+def main():
+    parser = argparse.ArgumentParser(description="Vibe-Check: Automated anti-vibecoding and anti-slop linter.")
+    parser.add_argument("path", nargs="?", default=".", help="Path to project directory or file (default: current directory)")
+    parser.add_argument("--prod", action="store_true", help="Enable strict production checks (sitemaps, legal pages, canonical tags)")
+    parser.add_argument("--fix", action="store_true", help="Automatically fix fixable errors (e.g. replace em-dashes with standard dashes)")
+    parser.add_argument("--changed", action="store_true", help="Only scan files changed in git (vs HEAD). Falls back to full scan outside repos.")
+    parser.add_argument("--no-cache", action="store_true", help="Disable file-hash caching (always re-scan every file)")
+
+    args = parser.parse_args()
+    target_path = Path(args.path)
+
+    if not target_path.exists():
+        print(f"{RED}Error:{RESET} Target path '{target_path}' does not exist.")
+        sys.exit(1)
+
+    if target_path.is_file():
+        # Scan parent directory or single file
+        errors, warnings = check_file_content(target_path, fix=args.fix)
+        if target_path.suffix in (".html", ".htm"):
+            he, hw = check_html_file(target_path, is_prod=args.prod)
+            errors.extend(he)
+            warnings.extend(hw)
+        
+        print(f"\n{BOLD}📄 {target_path}{RESET}")
+        for err in errors:
+            print(f"  {RED}✖ [ERROR]{RESET} {err}")
+        for warn in warnings:
+            print(f"  {YELLOW}⚠ [WARN]{RESET}  {warn}")
+        sys.exit(1 if errors else 0)
+
+    scan_directory(target_path, is_prod=args.prod, fix=args.fix,
+                   changed_only=args.changed, use_cache=not args.no_cache)
+
+if __name__ == "__main__":
+    main()
