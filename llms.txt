@@ -1,0 +1,129 @@
+# vibe-check , AI agent usage guide
+
+## What it is
+Single-file Python linter (stdlib only, zero dependencies) that catches 51 patterns
+of AI-generated code smell in web projects. Runs on Python 3.9+.
+
+## Quick install
+```bash
+curl -O https://raw.githubusercontent.com/Fayberr/vibe-check/main/vibe-check
+chmod +x vibe-check
+```
+
+## Recommended workflow (first run on a new machine)
+```
+1. Audit prevention layers:  vibe-check --setup --json
+2. Apply fixes (as needed):  vibe-check --fix
+3. Install commit blocker:   vibe-check --install-hooks
+4. Scan the project:         vibe-check . --json --quiet
+5. Production gate:          vibe-check . --prod --json --quiet
+```
+
+### Step 1: audit the machine
+`vibe-check --setup --json` returns structured JSON. Each check has:
+- `id`: which layer (claude-attribution, commit-msg-hook, pre-receive-hook)
+- `status`: ok | installed | needs_fix | not_installed | not_applicable | no_git
+- `detail`: human-readable explanation
+- `fix`: exact command to run (present when status is needs_fix / not_installed)
+- `auto_fixable`: boolean, whether the fix command is safe to run unattended
+
+Interpret statuses:
+- **needs_fix** / **not_installed**: run the `fix` command, then re-audit
+- **ok** / **installed**: this layer is configured correctly
+- **not_applicable**: this layer doesn't apply (e.g. no bare repos on this machine)
+- **no_git**: git not available, hooks can't be checked
+- Exit code 1 = at least one layer needs attention; exit code 0 = all good
+
+### Step 2: apply fixes
+Run only the fix commands for checks where status is needs_fix or not_installed:
+- `vibe-check --fix` , sets attribution.commit="" and attribution.pr="" in ~/.claude/settings.json
+- `vibe-check --install-hooks` , installs commit-msg hook in current repo
+- `vibe-check --install-hooks --server <dir>` , installs pre-receive hook on bare repos (server only)
+
+### Step 3: scan the project
+`vibe-check . --json --quiet` returns:
+```json
+{
+  "status": "failed",
+  "scanned": 43,
+  "errors": 3,
+  "warnings": 5,
+  "findings": [
+    {
+      "rule": "target-blank-noopener",
+      "severity": "error",
+      "message": "Found 1 target=\"_blank\" link(s) without rel=\"noopener noreferrer\" (lines 18).",
+      "line": 18,
+      "file": "src/components/Hero.jsx",
+      "fixable": false
+    }
+  ]
+}
+```
+- `status`: "ok" (no findings), "warn" (warnings only), "failed" (errors present)
+- `findings` may omit `line` and `file` for project-level checks
+- `fixable`: true means `--fix` can auto-fix this specific finding
+
+## Exit codes
+| Exit | Meaning |
+|------|---------|
+| 0 | Clean (no errors) |
+| 1 | Errors found (or --setup needs attention) |
+
+## Key flags (for AI decision-making)
+| Flag | Use when |
+|------|----------|
+| `--setup --json` | First run on a machine: audit what prevention is missing |
+| `--fix` | --setup reports claude-attribution needs_fix, or scan finds fixable errors |
+| `--install-hooks` | --setup reports commit-msg-hook not_installed |
+| `--install-hooks --server <dir>` | On a git server, --setup reports pre-receive-hook needs_fix |
+| `--json --quiet` | You want structured output to parse and act on |
+| `--prod` | Pre-deploy gate , enables stricter checks (legal pages, sitemaps) |
+| `--changed` | Only scan files changed since last commit |
+
+## Config file
+`.vibecheckrc` in project root: JSON object mapping rule IDs to severity overrides.
+```json
+{"scroll-animation-bloat": "warn", "emojis-in-ui": "off"}
+```
+Severities: "error", "warn", "off". Use to suppress project-specific false positives.
+
+## What it checks (51 rules)
+Domain & Branding (4): Vercel default domain URLs, text logos, default favicons, AI builder watermarks
+Design (7): purple gradients, stock photos, gradient hero text, scroll bloat, script fonts,
+  emojis in UI, single-page traps
+Copywriting (7): em-dashes, buzzword heroes, fake testimonials, fake visitor badges,
+  fake customer counts, fake metrics, missing legal pages (prod)
+Technical (10): broken buttons, source maps, console spam, unstyled selects,
+  unsanitized innerHTML, target=_blank without noopener, inline styles,
+  TypeScript as-casts, tech-debt markers, placeholder copy
+SEO & Accessibility (11): missing meta description, default tab titles,
+  long titles, missing og:image, missing JSON-LD, H1 hierarchy,
+  missing canonical (prod), missing sitemap/llms.txt (prod),
+  missing lang attribute, missing alt text
+Security (11): XSS sinks, file upload gaps, unsigned webhooks, hardcoded secrets,
+  broken JWT validation, debug mode, unsafe deserialization, Math.random()
+  for security, missing security headers, SSRF, no rate limiting
++ AI co-author trailer detection in git history (Rule 51)
++ Claude Code attribution settings check (claude-attribution rule)
++ Double-dash detection (-- used as prose dash)
+
+## When scan finds issues
+1. Parse `findings` array from JSON output
+2. For each finding with `fixable: true`, run `--fix` to auto-correct
+3. For security errors (rule starts with "xss-", "secrets-", "jwt-", "deserialization-",
+   "ssrf-", "ai-co-author-trailers"): treat as blocking , fix before deploy
+4. For AI co-author trailers specifically: run `vibe-check --setup` for prevention
+   and `scrub-ai-contributors` for cleanup of existing history
+5. For warnings: flag to the user, non-blocking
+
+## Defense layers against AI co-author trailers
+This tool provides 5 layers. Recommended: apply all applicable ones on first run.
+
+1. Settings fix: `vibe-check --fix` (root cause , tells Claude Code to stop appending trailers)
+2. Commit-msg hook: `vibe-check --install-hooks` (client-side , blocks commits with trailers)
+3. Pre-receive hook: `vibe-check --install-hooks --server <dir>` (server-side , blocks pushes, cannot be bypassed)
+4. Stop-hook scan: automatic in Claude Code sessions (session-end detection)
+5. Rule 51: built-in git history scan (retroactive detection)
+
+Layers 1-2 work everywhere. Layer 3 requires a self-hosted git server. Layer 4 is Claude Code-specific.

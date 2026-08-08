@@ -1606,48 +1606,25 @@ def scan_directory(target_dir: Path, is_prod: bool = False, fix: bool = False,
                     all_findings.append(Finding('ai-co-author-trailers', 'error',
                         f"Found {ai_trailer_count} AI co-author trailer(s) in git commit history. "
                         f"Commits include patterns like: {ai_matches[0].strip()}. "
-                        f"Run scrub-ai-contributors to remove them.").to_dict())
+                        f"Run 'vibe-check --setup' to prevent future occurrences and "
+                        f"'scrub-ai-contributors' to clean existing history.").to_dict())
                 if not quiet:
                     print(f"\n{BOLD}🔒 Security Checks:{RESET}")
                     print(f"  {RED}✖ [ERROR]{RESET} Found {ai_trailer_count} AI co-author trailer(s) in git commit history.")
                     print(f"         Commits include patterns like: {ai_matches[0].strip()}")
-                    print(f"         These are an obvious sign of vibecoded code. Run scrub-ai-contributors to remove them.")
+                    print(f"         Run {BOLD}vibe-check --setup{RESET} to prevent future occurrences and {BOLD}scrub-ai-contributors{RESET} to clean existing history.")
     except Exception:
         pass  # Not a git repo or git unavailable — skip
 
     # ── Missing-hook warning ────────────────────────────────────────────────
     # If this is a git repo but no commit-msg hook is installed (per-repo or
-    # global), nudge the user to install one. The hook is the primary
-    # prevention against AI co-author trailers; Rule 51 above is detection-only.
+    # global), nudge the user to run --setup (which covers hooks + more).
+    # Rule 51 above is detection-only; --setup is the prevention path.
     if not quiet:
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--git-dir"],
-                capture_output=True, text=True, cwd=str(target_dir), timeout=10,
-            )
-            if result.returncode == 0:
-                git_dir = Path(result.stdout.strip())
-                repo_hook = git_dir / "hooks" / "commit-msg"
-                global_hook = Path.home() / ".config" / "git" / "hooks" / "commit-msg"
-                global_hooks_set = False
-                try:
-                    r2 = subprocess.run(
-                        ["git", "config", "--get", "core.hooksPath"],
-                        capture_output=True, text=True, cwd=str(target_dir), timeout=10,
-                    )
-                    if r2.returncode == 0 and r2.stdout.strip():
-                        global_hook = Path(r2.stdout.strip()) / "commit-msg"
-                        global_hooks_set = True
-                except Exception:
-                    pass
-                hook_installed = (repo_hook.is_file() and
-                                  "Installed by vibe-check" in repo_hook.read_text(encoding="utf-8", errors="replace"))
-                global_installed = global_hook.is_file() and global_hooks_set
-                if not hook_installed and not global_installed:
-                    print(f"\n  {YELLOW}💡 Tip:{RESET} No commit-msg hook installed. AI co-author trailers can still land in commits.")
-                    print(f"         Run {BOLD}vibe-check --install-hooks{RESET} to block them at commit time.")
-        except Exception:
-            pass
+        hook_info = _check_commit_msg_hook(target_dir)
+        if hook_info["status"] == "not_installed":
+            print(f"\n  {YELLOW}💡 Tip:{RESET} No commit-msg hook installed. AI co-author trailers can still land in commits.")
+            print(f"         Run {BOLD}vibe-check --setup{RESET} to audit and fix all prevention layers.")
 
     if json_mode:
         _emit_json(all_findings, total_errors, total_warnings, scanned_files)
@@ -1849,6 +1826,207 @@ def _check_attribution_settings(fix=False):
         fixable=True)]
 
 
+def _check_commit_msg_hook(target_dir):
+    """Check if a vibe-check commit-msg hook is installed (per-repo or global).
+
+    Returns a dict: {status, detail, fix?}
+    Status is one of: 'installed', 'not_installed', 'no_git'
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            capture_output=True, text=True, cwd=str(target_dir), timeout=10,
+        )
+        if result.returncode != 0:
+            return {"status": "no_git", "detail": "Not a git repository (or git unavailable)"}
+
+        git_dir = Path(result.stdout.strip())
+        repo_hook = git_dir / "hooks" / "commit-msg"
+        global_hook = Path.home() / ".config" / "git" / "hooks" / "commit-msg"
+        global_hooks_set = False
+
+        try:
+            r2 = subprocess.run(
+                ["git", "config", "--get", "core.hooksPath"],
+                capture_output=True, text=True, cwd=str(target_dir), timeout=10,
+            )
+            if r2.returncode == 0 and r2.stdout.strip():
+                global_hook = Path(r2.stdout.strip()) / "commit-msg"
+                global_hooks_set = True
+        except Exception:
+            pass
+
+        hook_installed = (repo_hook.is_file() and
+                          "Installed by vibe-check" in repo_hook.read_text(encoding="utf-8", errors="replace"))
+        global_installed = global_hook.is_file() and global_hooks_set
+
+        if hook_installed:
+            return {"status": "installed", "detail": f"Per-repo hook at {repo_hook}"}
+        elif global_installed:
+            return {"status": "installed", "detail": f"Global hook at {global_hook}"}
+        else:
+            return {"status": "not_installed",
+                    "detail": "No vibe-check commit-msg hook installed",
+                    "fix": "vibe-check --install-hooks"}
+    except Exception:
+        return {"status": "no_git", "detail": "Git unavailable or not found"}
+
+
+def _check_pre_receive_hooks(target_dir):
+    """Check if pre-receive hooks are installed on bare repos under target_dir.
+
+    Returns a dict: {status, detail, fix?}
+    Status: 'installed', 'needs_fix', 'not_applicable'
+    """
+    try:
+        candidates = list(target_dir.glob("*.git"))
+    except (OSError, PermissionError):
+        return {"status": "not_applicable", "detail": "Cannot scan for bare repos (permission error)"}
+
+    # Filter to actual bare repos: must have HEAD + objects + refs at top level,
+    # and core.bare must be true (or absent in ancient repos — the structure check is enough).
+    bare_repos = []
+    for c in candidates:
+        if not c.is_dir():
+            continue
+        if c.name == ".git":
+            continue  # Regular repo's own .git dir, not a bare repo
+        # Bare repos have HEAD, objects/, refs/ at the top level
+        if (c / "HEAD").is_file() and (c / "objects").is_dir() and (c / "refs").is_dir():
+            bare_repos.append(c)
+
+    if not bare_repos:
+        return {"status": "not_applicable",
+                "detail": "No bare git repos detected on this machine",
+                "fix": "vibe-check --install-hooks --server <dir> (run on your git server)"}
+
+    total = 0
+    with_hook = 0
+    for repo in bare_repos:
+        if not (repo / "hooks").is_dir():
+            continue
+        total += 1
+        hook = repo / "hooks" / "pre-receive"
+        try:
+            if hook.is_file() and "Installed by vibe-check" in hook.read_text(encoding="utf-8", errors="replace"):
+                with_hook += 1
+        except (OSError, PermissionError):
+            pass
+
+    if total == 0:
+        return {"status": "not_applicable", "detail": "No bare repos with hooks directories found"}
+
+    if with_hook == total:
+        return {"status": "installed",
+                "detail": f"Pre-receive hook installed on all {total} bare repo(s)"}
+    else:
+        missing = total - with_hook
+        return {"status": "needs_fix",
+                "detail": f"Pre-receive hook installed on {with_hook}/{total} bare repo(s), {missing} missing",
+                "fix": "vibe-check --install-hooks --server " + str(target_dir)}
+
+
+def run_setup(target_dir, json_mode=False):
+    """Audit the machine for AI co-author trailer prevention layers.
+
+    With --json: outputs structured JSON for AI agent consumption,
+                 exits 1 if any layer needs attention.
+    Without --json: interactive wizard that prompts for each fix.
+    """
+    checks = []
+
+    # 1. Claude Code attribution settings
+    attr_findings = _check_attribution_settings(fix=False)
+    settings_path = Path.home() / ".claude" / "settings.json"
+    if attr_findings:
+        checks.append({
+            "id": "claude-attribution",
+            "status": "needs_fix",
+            "detail": str(attr_findings[0]),
+            "fix": "vibe-check --fix",
+            "auto_fixable": True,
+        })
+    elif settings_path.is_file():
+        checks.append({
+            "id": "claude-attribution",
+            "status": "ok",
+            "detail": "attribution settings correct: commit=\"\" pr=\"\"",
+        })
+    else:
+        checks.append({
+            "id": "claude-attribution",
+            "status": "not_applicable",
+            "detail": "~/.claude/settings.json not found (Claude Code may not be installed)",
+        })
+
+    # 2. Git commit-msg hook
+    hook_status = _check_commit_msg_hook(target_dir)
+    checks.append({
+        "id": "commit-msg-hook",
+        **hook_status,
+        "auto_fixable": hook_status.get("status") == "not_installed",
+    })
+
+    # 3. Pre-receive hook (server-side)
+    pre_receive = _check_pre_receive_hooks(target_dir)
+    checks.append({
+        "id": "pre-receive-hook",
+        **pre_receive,
+        "auto_fixable": pre_receive.get("status") == "needs_fix",
+    })
+
+    # ── JSON mode: structured output for AI agents ──────────────────────
+    if json_mode:
+        needs_attention = any(
+            c["status"] in ("needs_fix", "not_installed", "error") for c in checks
+        )
+        output = {
+            "status": "needs_attention" if needs_attention else "ok",
+            "checks": checks,
+        }
+        print(json.dumps(output, indent=2, ensure_ascii=False))
+        sys.exit(1 if needs_attention else 0)
+
+    # ── Interactive mode ────────────────────────────────────────────────
+    print(f"\n{BOLD}  vibe-check setup{RESET}")
+    print(f"  {'─' * 52}\n")
+
+    icon_map = {"ok": "✓", "installed": "✓", "needs_fix": "⚠", "not_installed": "⚠",
+                "not_applicable": "—", "error": "✖", "no_git": "—"}
+    color_map = {"ok": GREEN, "installed": GREEN, "needs_fix": YELLOW, "not_installed": YELLOW,
+                 "not_applicable": "", "error": RED, "no_git": ""}
+
+    any_fixed = False
+    for c in checks:
+        st = c["status"]
+        icon = icon_map.get(st, "?")
+        color = color_map.get(st, "")
+        print(f"  {color}{icon}{RESET} {c['id']}: {c['detail']}")
+
+        if c.get("fix") and c.get("auto_fixable"):
+            if sys.stdin.isatty():
+                try:
+                    answer = input(f"    Fix? [Y/n] ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+                if answer in ("", "y", "yes"):
+                    if c["id"] == "claude-attribution":
+                        _check_attribution_settings(fix=True)
+                    elif c["id"] == "commit-msg-hook":
+                        install_hooks(target_dir, global_hooks=False, server_mode=False)
+                    elif c["id"] == "pre-receive-hook":
+                        install_hooks(target_dir, global_hooks=False, server_mode=True)
+                    any_fixed = True
+            else:
+                print(f"    Run: {c['fix']}")
+
+    print(f"\n  {'─' * 52}")
+    if any_fixed:
+        print(f"  {GREEN}✓{RESET} Fixes applied.")
+    print(f"  Run {BOLD}vibe-check .{RESET} to scan your project.\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Vibe-Check: Automated anti-vibecoding and anti-slop linter.")
     parser.add_argument("path", nargs="?", default=".", help="Path to project directory or file (default: current directory)")
@@ -1859,6 +2037,7 @@ def main():
     parser.add_argument("--install-hooks", action="store_true", help="Install git commit-msg hook to block AI co-author trailers at commit time")
     parser.add_argument("--global", action="store_true", dest="global_hooks", help="With --install-hooks: install hooks globally (all repos)")
     parser.add_argument("--server", action="store_true", dest="server_mode", help="With --install-hooks: install pre-receive hook to all bare repos (server-side, cannot be bypassed)")
+    parser.add_argument("--setup", action="store_true", help="Audit prevention layers (Claude attribution, git hooks). With --json: structured output for AI agents.")
     parser.add_argument("--json", action="store_true", dest="json_mode", help="Output findings as machine-readable JSON (for AI agent consumption)")
     parser.add_argument("--quiet", action="store_true", help="Suppress all human-readable output (use with --json for clean machine output)")
 
@@ -1870,6 +2049,10 @@ def main():
                              server_mode=args.server_mode):
             sys.exit(1)
         return  # hooks installed, don't scan
+
+    if args.setup:
+        run_setup(target_path, json_mode=args.json_mode)
+        return  # setup complete, don't scan
 
     if not target_path.exists():
         print(f"{RED}Error:{RESET} Target path '{target_path}' does not exist.")

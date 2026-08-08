@@ -31,6 +31,12 @@ cd vibe-check
 # Auto-fix what's fixable
 ./vibe-check /path/to/project --fix
 
+# Audit prevention layers (AI co-author blocking, git hooks)
+./vibe-check --setup
+
+# Machine-readable for AI agents and CI
+./vibe-check /path/to/project --json --quiet
+
 # Only scan files changed since last git commit
 ./vibe-check /path/to/project --changed
 ```
@@ -138,6 +144,7 @@ FAILED: 3 error(s), 3 warning(s) found.
 | `--fix` | Auto-fix fixable errors (em-dashes) |
 | `--changed` | Only scan files changed since last git commit |
 | `--no-cache` | Disable file-hash caching (always re-scan) |
+| `--setup` | Audit prevention layers (Claude attribution, git hooks). Add `--json` for AI agent consumption |
 | `--install-hooks` | Install git commit-msg hook to block AI co-author trailers |
 | `--install-hooks --global` | Install the commit-msg hook globally (all repos) |
 | `--install-hooks --server <dir>` | Install pre-receive hook on all bare repos (server-side, cannot be bypassed) |
@@ -158,10 +165,15 @@ vibe-check provides layered defense. Each layer catches what the previous one mi
 
 Recommended setup for self-hosted git servers:
 ```bash
-vibe-check --fix                          # root cause: fix settings
-vibe-check --install-hooks --global       # client-side: block commits
+vibe-check --setup              # audit: see what needs fixing
+vibe-check --fix                # root cause: fix Claude Code settings
+vibe-check --install-hooks --global  # client-side: block commits
 vibe-check --install-hooks --server ~/    # server-side: block pushes
 ```
+
+### For AI Agents
+
+If you are an AI agent, start with [`llms.txt`](llms.txt) for a structured guide to installing, configuring, and running vibe-check. It covers the recommended workflow, JSON output schema, decision logic, and all flags in a dense, AI-actionable format.
 
 ### Machine-Readable Output (`--json`)
 
@@ -194,6 +206,8 @@ vibe-check . --json --quiet
 - Exit code: 0 for ok/warn, 1 for failed
 
 ### Git Hook: Blocking AI Co-Author Trailers
+
+**Start with `vibe-check --setup`** ,  it audits your machine and tells you exactly which prevention layers are missing and how to install them.
 
 **Root cause fix:** Run `vibe-check --fix` once. It sets `attribution.commit` and `attribution.pr` to `""` in `~/.claude/settings.json`, which tells Claude Code to never append `Co-Authored-By` trailers. This fixes the problem at the source.
 
