@@ -137,6 +137,22 @@ FAILED: 3 error(s), 3 warning(s) found.
 | `--fix` | Auto-fix fixable errors (em-dashes) |
 | `--changed` | Only scan files changed since last git commit |
 | `--no-cache` | Disable file-hash caching (always re-scan) |
+| `--install-hooks` | Install git commit-msg hook to block AI co-author trailers |
+| `--install-hooks --global` | Install the commit-msg hook globally (all repos) |
+
+### Git Hook: Blocking AI Co-Author Trailers
+
+Rule 51 detects AI co-author trailers in past commits, but detection after the fact is not enough: GitHub caches contributors aggressively, making retroactive cleanup painful. The `--install-hooks` flag installs a git `commit-msg` hook that **blocks commits before they happen**:
+
+```bash
+# Per-repo (recommended)
+vibe-check --install-hooks
+
+# Or globally (all repos on the machine)
+vibe-check --install-hooks --global
+```
+
+Once installed, any `git commit` with a `Co-Authored-By:` trailer referencing an AI tool (Claude, GPT, Gemini, Copilot, Codex) will be rejected. Emergency bypass: `git commit --no-verify`.
 
 ## CI Integration
 
