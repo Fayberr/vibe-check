@@ -1261,7 +1261,8 @@ def check_html_file(file_path: Path, is_prod: bool = False):
 
 def scan_directory(target_dir: Path, is_prod: bool = False, fix: bool = False,
                    changed_only: bool = False, use_cache: bool = True,
-                   json_mode: bool = False, quiet: bool = False):
+                   json_mode: bool = False, quiet: bool = False,
+                   attr_findings: list = None):
     if not quiet:
         print(f"\n{BOLD}{CYAN}🔍 Running Vibe-Check on:{RESET} {target_dir.resolve()}\n")
 
@@ -1276,6 +1277,22 @@ def scan_directory(target_dir: Path, is_prod: bool = False, fix: bool = False,
     total_warnings = 0
     scanned_files = 0
     all_findings = []  # accumulated for --json output
+
+    # ── Claude Code attribution settings check ─────────────────────────────────
+    # Findings are pre-computed in main() to avoid double-calling for directory
+    # mode. Catches the root cause of AI co-author trailers: Claude Code's
+    # attribution.commit setting in ~/.claude/settings.json.
+    if attr_findings is None:
+        attr_findings = []
+    for f in attr_findings:
+        if f.severity == 'error':
+            total_errors += 1
+        else:
+            total_warnings += 1
+        if json_mode:
+            all_findings.append(f.to_dict())
+        if not quiet:
+            print(f"  {RED}✖ [ERROR]{RESET} {f}" if f.severity == 'error' else f"  {YELLOW}⚠ [WARN]{RESET}  {f}")
 
     # ── Cache ──────────────────────────────────────────────────────────────────
     cache_path = target_dir / ".vibe-check-cache.json"
@@ -1632,6 +1649,73 @@ def install_hooks(target_dir, global_hooks=False):
     print(f"  Emergency bypass: git commit --no-verify")
     return True
 
+def _check_attribution_settings(fix=False):
+    """Check if Claude Code attribution settings leave AI co-author trailers enabled.
+
+    Claude Code appends Co-Authored-By trailers by default via the platform's
+    Bash tool description. The root-cause fix is setting attribution.commit
+    and attribution.pr to empty strings in ~/.claude/settings.json.
+
+    Returns list of Finding objects. With --fix, automatically corrects the
+    settings so AI trailers are never appended.
+    """
+    settings_path = Path.home() / ".claude" / "settings.json"
+    if not settings_path.is_file():
+        return []  # Claude Code not installed — nothing to check
+
+    try:
+        raw = settings_path.read_text(encoding="utf-8")
+        settings = json.loads(raw)
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    attribution = settings.get("attribution", {})
+    if not isinstance(attribution, dict):
+        attribution = {}
+
+    commit_val = attribution.get("commit")
+    pr_val = attribution.get("pr")
+
+    issues = []
+    if commit_val is None:
+        issues.append("commit (missing)")
+    elif commit_val != "":
+        issues.append(f"commit={commit_val!r}")
+
+    if pr_val is None:
+        issues.append("pr (missing)")
+    elif pr_val != "":
+        issues.append(f"pr={pr_val!r}")
+
+    if not issues:
+        return []  # Both already set to empty string — clean
+
+    if fix:
+        if "attribution" not in settings:
+            settings["attribution"] = {}
+        settings["attribution"]["commit"] = ""
+        settings["attribution"]["pr"] = ""
+        try:
+            formatted = json.dumps(settings, indent=2, ensure_ascii=False)
+            # Preserve trailing newline if the original had one
+            if raw.endswith("\n"):
+                formatted += "\n"
+            settings_path.write_text(formatted, encoding="utf-8")
+            return [Finding('claude-attribution', 'warn',
+                "Fixed Claude Code attribution settings: commit and pr set to empty string. "
+                "AI co-author trailers will no longer be appended to commits or PRs.",
+                fixable=True)]
+        except OSError:
+            return [Finding('claude-attribution', 'error',
+                f"Could not write to {settings_path}. Check file permissions.")]
+
+    return [Finding('claude-attribution', 'warn',
+        f"Claude Code attribution settings allow AI co-author trailers: {', '.join(issues)}. "
+        f"Run 'vibe-check --fix' to set them to empty, or edit ~/.claude/settings.json: "
+        f'{{"attribution": {{"commit": "", "pr": ""}}}}',
+        fixable=True)]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Vibe-Check: Automated anti-vibecoding and anti-slop linter.")
     parser.add_argument("path", nargs="?", default=".", help="Path to project directory or file (default: current directory)")
@@ -1656,6 +1740,11 @@ def main():
         print(f"{RED}Error:{RESET} Target path '{target_path}' does not exist.")
         sys.exit(1)
 
+    # ── Claude Code attribution settings check ─────────────────────────────────
+    # Runs once regardless of scan mode. Catches the root cause of AI co-author
+    # trailers before they reach git: Claude Code's attribution.commit setting.
+    attr_findings = _check_attribution_settings(fix=args.fix)
+
     if target_path.is_file():
         # Scan parent directory or single file
         errors, warnings = check_file_content(target_path, fix=args.fix)
@@ -1664,16 +1753,26 @@ def main():
             errors.extend(he)
             warnings.extend(hw)
 
-        # Stamp file path on all findings
+        # Merge attribution findings
+        for f in attr_findings:
+            (errors if f.severity == 'error' else warnings).append(f)
+
+        # Stamp file path on content findings (skip system-level attribution findings)
         rel = str(target_path.name)
         for f in errors + warnings:
-            f.file = rel
+            if f.rule != 'claude-attribution':
+                f.file = rel
 
         if args.json_mode:
             _emit_json(errors + warnings, len(errors), len(warnings), 1)
             sys.exit(1 if errors else 0)
 
         if not args.quiet:
+            for f in attr_findings:
+                if f.severity == 'error':
+                    print(f"{RED}✖ [ERROR]{RESET} {f}")
+                else:
+                    print(f"{YELLOW}⚠ [WARN]{RESET}  {f}")
             print(f"\n{BOLD}📄 {target_path}{RESET}")
             for err in errors:
                 print(f"  {RED}✖ [ERROR]{RESET} {err}")
@@ -1683,7 +1782,8 @@ def main():
 
     scan_directory(target_path, is_prod=args.prod, fix=args.fix,
                    changed_only=args.changed, use_cache=not args.no_cache,
-                   json_mode=args.json_mode, quiet=args.quiet)
+                   json_mode=args.json_mode, quiet=args.quiet,
+                   attr_findings=attr_findings)
 
 if __name__ == "__main__":
     main()

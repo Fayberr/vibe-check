@@ -76,6 +76,7 @@ cd vibe-check
 - **SSRF via user URLs:** unfiltered user input flowing to `fetch()`/`axios`/`requests.get()`
 - **No rate limiting:** missing `express-rate-limit` / `slowapi` / `flask-limiter`
 - **AI co-author trailers in git commits:** `Co-Authored-By: Claude/GPT/Gemini/Copilot` in commit history
+- **Claude Code attribution settings:** `~/.claude/settings.json` leaves AI co-author trailers enabled (`--fix` corrects this at the source)
 
 ### SEO & Accessibility (Rules 30-39)
 - Missing `<meta name="description">`
@@ -173,6 +174,10 @@ vibe-check . --json --quiet
 - Exit code: 0 for ok/warn, 1 for failed
 
 ### Git Hook: Blocking AI Co-Author Trailers
+
+**Root cause fix:** Run `vibe-check --fix` once. It sets `attribution.commit` and `attribution.pr` to `""` in `~/.claude/settings.json`, which tells Claude Code to never append `Co-Authored-By` trailers. This fixes the problem at the source.
+
+The git hook below is the safety net — it blocks trailers that slip past the settings fix (e.g., from other AI tools or misconfigured machines).
 
 Rule 51 detects AI co-author trailers in past commits, but detection after the fact is not enough: GitHub caches contributors aggressively, making retroactive cleanup painful. The `--install-hooks` flag installs a git `commit-msg` hook that **blocks commits before they happen**:
 
