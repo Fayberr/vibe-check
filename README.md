@@ -177,7 +177,7 @@ vibe-check . --json --quiet
 
 **Root cause fix:** Run `vibe-check --fix` once. It sets `attribution.commit` and `attribution.pr` to `""` in `~/.claude/settings.json`, which tells Claude Code to never append `Co-Authored-By` trailers. This fixes the problem at the source.
 
-The git hook below is the safety net — it blocks trailers that slip past the settings fix (e.g., from other AI tools or misconfigured machines).
+The git hook below is the safety net -- it blocks trailers that slip past the settings fix (e.g., from other AI tools or misconfigured machines).
 
 Rule 51 detects AI co-author trailers in past commits, but detection after the fact is not enough: GitHub caches contributors aggressively, making retroactive cleanup painful. The `--install-hooks` flag installs a git `commit-msg` hook that **blocks commits before they happen**:
 
