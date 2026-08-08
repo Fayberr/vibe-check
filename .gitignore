@@ -2,3 +2,4 @@
 __pycache__/
 .vite/
 vibe_check.egg-info/
+dist/

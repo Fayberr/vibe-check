@@ -15,7 +15,7 @@ AI code assistants are incredible accelerators, but they reproduce common patter
 
 ```bash
 # pip install (recommended)
-pip install vibe-check
+pip install vibe-linter
 
 # Or download the single file (no pip needed)
 curl -O https://raw.githubusercontent.com/Fayberr/vibe-check/main/vibe-check
