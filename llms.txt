@@ -6,6 +6,9 @@ of AI-generated code smell in web projects. Runs on Python 3.9+.
 
 ## Quick install
 ```bash
+pip install vibe-check
+
+# Or single-file download (no pip needed):
 curl -O https://raw.githubusercontent.com/Fayberr/vibe-check/main/vibe-check
 chmod +x vibe-check
 ```

@@ -14,7 +14,10 @@ AI code assistants are incredible accelerators, but they reproduce common patter
 ## Quick Start
 
 ```bash
-# Download (no install needed , single file, stdlib only)
+# pip install (recommended)
+pip install vibe-check
+
+# Or download the single file (no pip needed)
 curl -O https://raw.githubusercontent.com/Fayberr/vibe-check/main/vibe-check
 chmod +x vibe-check
 

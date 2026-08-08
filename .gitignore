@@ -1,3 +1,4 @@
 .vibe-check-cache.json
 __pycache__/
 .vite/
+vibe_check.egg-info/
