@@ -61,8 +61,11 @@ _COMMIT_MSG_HOOK = r"""#!/bin/sh
 # This hook blocks those commits before they happen — GitHub contributor
 # caching makes retroactive cleanup much harder than upfront prevention.
 #
+# Global hooks (--global): this hook chains to per-repo .git/hooks/commit-msg
+# after the AI check passes, so per-repo hooks aren't silently disabled.
+#
 # Emergency bypass: git commit --no-verify
-# To uninstall: rm .git/hooks/commit-msg
+# To uninstall: rm .git/hooks/commit-msg  (or rm ~/.config/git/hooks/commit-msg for global)
 
 COMMIT_MSG_FILE="$1"
 
@@ -70,6 +73,7 @@ if [ ! -f "$COMMIT_MSG_FILE" ]; then
     exit 0
 fi
 
+# --- Phase 1: Block AI co-author trailers ---
 if grep -qiE '^Co-Authored-By:.*(Claude|Anthropic|GPT|ChatGPT|Gemini|Copilot|Codex)' "$COMMIT_MSG_FILE"; then
     cat >&2 << 'EOF'
 ╔══════════════════════════════════════════════════════════════╗
@@ -87,6 +91,16 @@ if grep -qiE '^Co-Authored-By:.*(Claude|Anthropic|GPT|ChatGPT|Gemini|Copilot|Cod
 ╚══════════════════════════════════════════════════════════════╝
 EOF
     exit 1
+fi
+
+# --- Phase 2: Chain to per-repo hook (for global installs) ---
+REPO_GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
+if [ -n "$REPO_GIT_DIR" ]; then
+    REPO_HOOK="$REPO_GIT_DIR/hooks/commit-msg"
+    # Chain only if a different, executable per-repo hook exists
+    if [ -x "$REPO_HOOK" ] && [ "$REPO_HOOK" != "$0" ]; then
+        exec "$REPO_HOOK" "$@"
+    fi
 fi
 """
 
@@ -1390,6 +1404,39 @@ def scan_directory(target_dir: Path, is_prod: bool = False, fix: bool = False,
                 total_errors += ai_trailer_count
     except Exception:
         pass  # Not a git repo or git unavailable — skip
+
+    # ── Missing-hook warning ────────────────────────────────────────────────
+    # If this is a git repo but no commit-msg hook is installed (per-repo or
+    # global), nudge the user to install one. The hook is the primary
+    # prevention against AI co-author trailers; Rule 51 above is detection-only.
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            capture_output=True, text=True, cwd=str(target_dir), timeout=10,
+        )
+        if result.returncode == 0:
+            git_dir = Path(result.stdout.strip())
+            repo_hook = git_dir / "hooks" / "commit-msg"
+            global_hook = Path.home() / ".config" / "git" / "hooks" / "commit-msg"
+            global_hooks_set = False
+            try:
+                r2 = subprocess.run(
+                    ["git", "config", "--get", "core.hooksPath"],
+                    capture_output=True, text=True, cwd=str(target_dir), timeout=10,
+                )
+                if r2.returncode == 0 and r2.stdout.strip():
+                    global_hook = Path(r2.stdout.strip()) / "commit-msg"
+                    global_hooks_set = True
+            except Exception:
+                pass
+            hook_installed = (repo_hook.is_file() and
+                              "Installed by vibe-check" in repo_hook.read_text(encoding="utf-8", errors="replace"))
+            global_installed = global_hook.is_file() and global_hooks_set
+            if not hook_installed and not global_installed:
+                print(f"\n  {YELLOW}💡 Tip:{RESET} No commit-msg hook installed. AI co-author trailers can still land in commits.")
+                print(f"         Run {BOLD}vibe-check --install-hooks{RESET} to block them at commit time.")
+    except Exception:
+        pass
 
     print(f"\n{BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}")
     print(f"Scanned {scanned_files} file(s).")
