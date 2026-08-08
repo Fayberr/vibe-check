@@ -508,21 +508,24 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
     except Exception as e:
         return errors, warnings
 
+    is_test_file = _is_test_path(file_path)
+
     # Check 1: Em-dashes (U+2014)
-    em_dash_matches = list(re.finditer(r"—", content))
-    if em_dash_matches:
-        sev = _sev('em-dashes', 'error')
-        if sev != 'off':
-            (errors if sev == 'error' else warnings).append(
-                Finding('em-dashes', sev,
-                    f"Found {len(em_dash_matches)} em-dash ('—') character(s). "
-                    f"Replace with comma (preferred) or standard dash '-'.", fixable=True)
-            )
-            if fix:
-                content = content.replace("—", ", ")
-                file_path.write_text(content, encoding="utf-8")
-                warnings.append(Finding('em-dashes', 'warn',
-                    "Auto-fixed em-dashes by replacing with commas.", fixable=True))
+    if not is_test_file:
+        em_dash_matches = list(re.finditer(r"—", content))
+        if em_dash_matches:
+            sev = _sev('em-dashes', 'error')
+            if sev != 'off':
+                (errors if sev == 'error' else warnings).append(
+                    Finding('em-dashes', sev,
+                        f"Found {len(em_dash_matches)} em-dash ('—') character(s). "
+                        f"Replace with comma (preferred) or standard dash '-'.", fixable=True)
+                )
+                if fix:
+                    content = content.replace("—", ", ")
+                    file_path.write_text(content, encoding="utf-8")
+                    warnings.append(Finding('em-dashes', 'warn',
+                        "Auto-fixed em-dashes by replacing with commas.", fixable=True))
 
     # Check 1b: Double hyphens used as em-dash replacement (-- in prose)
     # Pattern: word, space(s), --, space(s), word — the classic AI slop
@@ -935,7 +938,6 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
             ("token assignment", r'token\s*[:=]\s*["\'][A-Za-z0-9+/=]{20,}["\']'),
         ]
         found_secrets = []
-        is_test_file = _is_test_path(file_path)
         is_md = file_path.suffix == '.md'
         for label, pattern in secret_patterns:
             for m in re.finditer(pattern, content, re.IGNORECASE):
