@@ -1506,12 +1506,20 @@ def install_hooks(target_dir, global_hooks=False):
             print(f"  {YELLOW}⚠{RESET}  Existing commit-msg hook backed up to {backup.name}")
 
     hook_path.write_text(_COMMIT_MSG_HOOK, encoding="utf-8")
-    hook_path.chmod(0o755)
+
+    # Make executable. On Windows os.chmod only affects the read-only
+    # attribute; Git for Windows determines executability by file content
+    # (the #!/bin/sh shebang), so the hook works regardless.
+    try:
+        hook_path.chmod(0o755)
+    except (OSError, NotImplementedError):
+        pass  # Windows: chmod doesn't set execute bits, but git still runs the hook
 
     scope = "Global" if global_hooks else "Repository"
     print(f"{GREEN}✔{RESET} {scope} commit-msg hook installed: {hook_path}")
     print(f"  AI co-author trailers (Claude, GPT, Gemini, Copilot, Codex)")
     print(f"  will now be blocked at commit time.")
+    print(f"  Requirements: git (Git for Windows on Windows).")
     print(f"  Emergency bypass: git commit --no-verify")
     return True
 
