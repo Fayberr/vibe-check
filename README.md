@@ -1,6 +1,6 @@
 # vibe-check
 
-**Catch AI-vibecoded slop before it ships.** A single-file, zero-dependency Python linter that detects 50 patterns of AI-generated code smell in web projects — from missing favicons to hardcoded API keys.
+**Catch AI-vibecoded slop before it ships.** A single-file, zero-dependency Python linter that detects 50 patterns of AI-generated code smell in web projects , from missing favicons to hardcoded API keys.
 
 ```bash
 vibe-check ./my-project
@@ -14,7 +14,7 @@ AI code assistants are incredible accelerators, but they reproduce common patter
 ## Quick Start
 
 ```bash
-# Download (no install needed — single file, stdlib only)
+# Download (no install needed , single file, stdlib only)
 curl -O https://raw.githubusercontent.com/Fayberr/vibe-check/main/vibe-check
 chmod +x vibe-check
 
@@ -51,11 +51,11 @@ cd vibe-check
 - Generic gradient hero typography
 - Scroll animation bloat (excessive Framer Motion / AOS)
 - Cursive/script font imports (Dancing Script, Pacifico, etc.)
-- **Emojis in UI copy** — zero tolerance, use SVG icons
+- **Emojis in UI copy** , zero tolerance, use SVG icons
 - Single-page traps for complex apps
 
 ### Copywriting & Social Proof Red Flags (Rules 12-19)
-- **Em-dashes** (`—`) in UI copy — replace with commas (auto-fixable)
+- **Em-dashes** (U+2014) in UI copy: replace with commas (auto-fixable)
 - Vague buzzword hero headlines
 - Fake testimonials ("John Doe", "Jane Smith")
 - Fake live visitor badges
@@ -118,8 +118,8 @@ Scanned 43 file(s).
 FAILED: 3 error(s), 3 warning(s) found.
 ```
 
-- **ERROR** — blocks CI, must fix
-- **WARN** — advisory, should fix
+- **ERROR** , blocks CI, must fix
+- **WARN** , advisory, should fix
 
 ## Exit Codes
 
@@ -184,7 +184,7 @@ File hashes are cached in `.vibe-check-cache.json` (project root). Unchanged fil
 
 ## Contributing
 
-vibe-check is built for universality — every rule must make sense on any web project, not just one person's setup.
+vibe-check is built for universality , every rule must make sense on any web project, not just one person's setup.
 
 Before contributing a new check, verify:
 1. It catches a real, common AI-generated anti-pattern
@@ -200,17 +200,17 @@ python3 tests/test-stop-hook.py
 ## FAQ
 
 **Q: Why not ESLint/Stylelint/some-other-linter?**
-A: vibe-check catches patterns those tools don't — copywriting tropes, branding mistakes, security misconfigurations that span frameworks. It complements, not replaces, existing linters.
+A: vibe-check catches patterns those tools don't , copywriting tropes, branding mistakes, security misconfigurations that span frameworks. It complements, not replaces, existing linters.
 
 **Q: What about false positives?**
-A: Every check has suppression logic. If you hit a false positive, open an issue — we'll add a suppression pattern.
+A: Every check has suppression logic. If you hit a false positive, open an issue , we'll add a suppression pattern.
 
 **Q: Can I use this in my own projects?**
 A: Yes. MIT licensed. Designed to be universal from day one.
 
 **Q: How is this different from other "vibe coding" critiques?**
-A: This is an automated tool, not a blog post. It runs in CI, blocks deployments, and enforces rules mechanically — not by memory.
+A: This is an automated tool, not a blog post. It runs in CI, blocks deployments, and enforces rules mechanically , not by memory.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT , see [LICENSE](LICENSE).

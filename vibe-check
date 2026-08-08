@@ -191,22 +191,27 @@ def check_file_content(file_path: Path, fix: bool = False):
         errors.append("Hardcoded 'vercel.app' URL detected in source code.")
 
     # Check 3: Leftover AI builder watermarks
-    watermarks = ["Made with Lovable", "Created with v0", "built with bolt.new"]
-    for wm in watermarks:
-        if wm.lower() in content.lower():
-            errors.append(f"Leftover AI builder watermark detected: '{wm}'")
+    # Skip .md files — documentation naturally references these by name.
+    if not file_path.suffix == '.md':
+        watermarks = ["Made with Lovable", "Created with v0", "built with bolt.new"]
+        for wm in watermarks:
+            if wm.lower() in content.lower():
+                errors.append(f"Leftover AI builder watermark detected: '{wm}'")
 
     # Check 4: Placeholder text & fake reviews
-    placeholders = ["John Doe", "Jane Smith", "Trusted by 10,000+ creators", "Lorem ipsum"]
-    for ph in placeholders:
-        if ph in content:
-            warnings.append(f"Placeholder copy detected: '{ph}'")
+    # Skip .md files — documentation naturally lists these as examples.
+    if not file_path.suffix == '.md':
+        placeholders = ["John Doe", "Jane Smith", "Trusted by 10,000+ creators", "Lorem ipsum"]
+        for ph in placeholders:
+            if ph in content:
+                warnings.append(f"Placeholder copy detected: '{ph}'")
 
     # Check 5: Cursive/script font imports
-    script_fonts = ["Dancing+Script", "Pacifico", "Great+Vibes", "Satisfy", "Caveat"]
-    for font in script_fonts:
-        if font in content:
-            warnings.append(f"Cursive/script font import detected: '{font}'")
+    if not file_path.suffix == '.md':
+        script_fonts = ["Dancing+Script", "Pacifico", "Great+Vibes", "Satisfy", "Caveat"]
+        for font in script_fonts:
+            if font in content:
+                warnings.append(f"Cursive/script font import detected: '{font}'")
 
     # Check 6: Unstyled <select> elements (TSX/JSX only).
     # Native selects render browser-default chrome (arrow, focus ring, white option
