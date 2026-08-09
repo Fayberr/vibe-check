@@ -502,7 +502,10 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
         """Resolve effective severity: 'error', 'warn', or 'off'."""
         if config is None:
             return default
-        return config.get('rules', {}).get(rule_id, default)
+        rules = config.get('rules')
+        if isinstance(rules, dict) and rule_id in rules:
+            return rules[rule_id]
+        return config.get(rule_id, default)
 
     try:
         content = file_path.read_text(encoding="utf-8", errors="ignore")
