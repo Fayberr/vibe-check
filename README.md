@@ -1,6 +1,6 @@
 # vibe-check
 
-**Catch AI-vibecoded slop before it ships.** A single-file, zero-dependency Python linter that detects 51 patterns of AI-generated code smell in web projects , from missing favicons to hardcoded API keys.
+**Catch AI-vibecoded slop before it ships.** A single-file, zero-dependency Python linter that detects 52 patterns of AI-generated code smell in web projects , from missing favicons to hardcoded API keys.
 
 ```bash
 vibe-check ./my-project
@@ -46,7 +46,7 @@ cd vibe-check
 
 **Requirements:** Python 3.9+. Nothing else.
 
-## What It Checks (51 Rules)
+## What It Checks (52 Rules)
 
 ### Domain & Branding (Rules 1-4)
 - Default `vercel.app` URLs in source
@@ -100,7 +100,7 @@ cd vibe-check
 - Missing `lang` attribute on `<html>`
 - Missing `alt` text on images
 
-### Technical & Code Quality (Rules 20-29)
+### Technical & Code Quality (Rules 20-30)
 - Broken buttons (`href="#"` without handlers)
 - Exposed production source maps
 - Console error/warning spam (`console.log` in frontend code)
@@ -111,6 +111,7 @@ cd vibe-check
 - `as` type casts in TypeScript (prefer type narrowing)
 - TODO/FIXME/HACK tech-debt markers
 - Placeholder copy ("Lorem ipsum", fake names)
+- Password inputs missing `autocomplete` (breaks password managers)
 
 ## Output
 
