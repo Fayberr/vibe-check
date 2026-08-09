@@ -782,12 +782,22 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                         after = content[m.end():m.end() + 20].strip()
                         if after.startswith("''") or after.startswith('""') or after.startswith('``'):
                             continue
-                        # Skip if content within ~300 chars contains esc( — developer is escaping
-                        nearby = content[m.end():m.end() + 300]
+                        # Skip if nearby content contains esc( — developer is escaping.
+                        # Use a generous window (8000 chars) because long template
+                        # literals can put interpolations many lines below the
+                        # assignment. A shorter window (the old 300) missed safely-
+                        # escaped templates in password-manager/autofill.ts.
+                        nearby = content[m.end():m.end() + 8000]
                         if 'esc(' in nearby:
                             continue
-                        # Skip static string assignments (no template interpolation)
+                        # Skip purely static template literals — no ${...} means
+                        # nothing user-controlled can leak in.
                         after_trim = content[m.end():m.end() + 50].lstrip()
+                        if after_trim.startswith('`'):
+                            tmpl = content[m.end():m.end() + 10000]
+                            if '${' not in tmpl:
+                                continue
+                        # Skip static string assignments (no template interpolation)
                         if after_trim.startswith("'") or after_trim.startswith('"'):
                             continue
                         # Skip known safe renderer functions
@@ -1422,6 +1432,34 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                                 f"to prevent brute-force, credential stuffing, and resource exhaustion attacks."
                             )
                         )
+
+    # Check 25: Password inputs missing autocomplete — WARN.
+    # Password managers rely on autocomplete attributes to fill, generate,
+    # and update credentials. Without them, users are pushed toward weak
+    # or reused passwords, and saved credentials can't be updated after a
+    # password change. Flag any <input type="password"> missing autocomplete.
+    if file_path.suffix in (".html", ".tsx", ".jsx"):
+        pw_inputs_missing_complete = []
+        for m in re.finditer(r'<\s*input\b', content):
+            pos = m.start()
+            tag_body = _jsx_tag_body(content, pos, 1024)
+            if re.search(r'type\s*=\s*["\x60\']password["\x60\']', tag_body, re.IGNORECASE):
+                if not re.search(r'autocomplet', tag_body, re.IGNORECASE):
+                    if not _is_comment(content, pos):
+                        pw_inputs_missing_complete.append(f"L{_line_of(content, pos)}")
+        if pw_inputs_missing_complete:
+            sev = _sev('missing-input-autocomplete', 'warn')
+            if sev != 'off':
+                (errors if sev == 'error' else warnings).append(
+                    Finding('missing-input-autocomplete', sev,
+                        f"Found {len(pw_inputs_missing_complete)} password input(s) missing autocomplete "
+                        f"({', '.join(pw_inputs_missing_complete[:8])}"
+                        f"{'...' if len(pw_inputs_missing_complete) > 8 else ''}). "
+                        f"Add autocomplete=\"current-password\" (login/signin), "
+                        f"autocomplete=\"new-password\" (registration/change), or "
+                        f"autocomplete=\"off\" if this is a one-time-code or non-credential field."
+                    )
+                )
 
     return errors, warnings
 
