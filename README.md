@@ -1,6 +1,6 @@
 # vibe-check
 
-**Catch AI-vibecoded slop before it ships.** A single-file, zero-dependency Python linter that detects 52 patterns of AI-generated code smell in web projects , from missing favicons to hardcoded API keys.
+**Catch AI-vibecoded slop before it ships.** A single-file, zero-dependency Python linter that detects 54 patterns of AI-generated code smell in web projects , from missing favicons to hardcoded API keys.
 
 ```bash
 vibe-check ./my-project
@@ -46,7 +46,7 @@ cd vibe-check
 
 **Requirements:** Python 3.9+. Nothing else.
 
-## What It Checks (52 Rules)
+## What It Checks (54 Rules)
 
 ### Domain & Branding (Rules 1-4)
 - Default `vercel.app` URLs in source
@@ -73,7 +73,7 @@ cd vibe-check
 - Fake metric counter bars
 - Missing Privacy Policy / Terms & Conditions (production mode)
 
-### Security (Rules 40-50)
+### Security (Rules 40-52)
 - **XSS sinks:** `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, `eval()`, `v-html`, `javascript:` URLs
 - **File upload gaps:** `<input type="file">` without `accept`, multer without `fileFilter`, `express.static` over upload dirs
 - **Unsigned webhooks:** missing HMAC signature verification
@@ -85,6 +85,8 @@ cd vibe-check
 - **Missing security headers:** Express without helmet, Flask without Talisman, FastAPI without Secure
 - **SSRF via user URLs:** unfiltered user input flowing to `fetch()`/`axios`/`requests.get()`
 - **No rate limiting:** missing `express-rate-limit` / `slowapi` / `flask-limiter`
+- **Supabase/Postgres RLS bypass:** `USING (true)` or `WITH CHECK (true)` unconditional policies, or `DISABLE ROW LEVEL SECURITY`
+- **Exposed Supabase service_role key:** JWT with `role: "service_role"` hardcoded in source files
 - **AI co-author trailers in git commits:** `Co-Authored-By: Claude/GPT/Gemini/Copilot` in commit history
 - **Claude Code attribution settings:** `~/.claude/settings.json` leaves AI co-author trailers enabled (`--fix` corrects this at the source)
 

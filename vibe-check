@@ -3,13 +3,14 @@ import sys
 import os
 import re
 import json
+import base64
 import hashlib
 import argparse
 import subprocess
 from pathlib import Path
 from html.parser import HTMLParser
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 # --- Color formatting for CLI ---
 RED = "\033[91m"
@@ -42,7 +43,7 @@ EXCLUDE_DIRS = {
 
 TEXT_EXTENSIONS = {
     ".html", ".htm", ".jsx", ".tsx", ".js", ".ts",
-    ".vue", ".svelte", ".json", ".md", ".css", ".py"
+    ".vue", ".svelte", ".json", ".md", ".css", ".py", ".sql"
 }
 
 # Per-scan deduplication state — reset at start of each scan_directory call.
@@ -530,7 +531,9 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
     # Check 1b: Double hyphens used as em-dash replacement (-- in prose)
     # Pattern: word, space(s), --, space(s), word — the classic AI slop
     # "like this -- it means" but NOT "--fix", "i--", "<!--", "-->", "----"
-    dd_matches = list(re.finditer(r'\w\s+--\s+\w', content))
+    # Skipped for .sql: "--" is SQL's native line-comment syntax, so this
+    # would false-positive on virtually every commented migration file.
+    dd_matches = list(re.finditer(r'\w\s+--\s+\w', content)) if file_path.suffix != '.sql' else []
     if dd_matches:
         # Filter out false positives: HTML comments, CLI flags, decrement
         real = []
@@ -1460,6 +1463,77 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                         f"autocomplete=\"off\" if this is a one-time-code or non-credential field."
                     )
                 )
+
+    # Check 26: Permissive or disabled Supabase/Postgres row-level security
+    # policies in SQL migrations — ERROR. "Vibe-coded" Supabase apps commonly
+    # ship a policy like `USING (true)` (meant as a placeholder to "get it
+    # working") that grants every row to every anon-key holder, or an explicit
+    # DISABLE ROW LEVEL SECURITY left in from local debugging. This is a
+    # static, git-visible signal only: it can't see policies that were
+    # changed via the Supabase dashboard rather than a checked-in migration,
+    # so it's a first line of defense, not a substitute for a live probe.
+    if file_path.suffix == '.sql':
+        rls_findings = []
+        for m in re.finditer(r'\bUSING\s*\(\s*true\s*\)', content, re.IGNORECASE):
+            rls_findings.append(f"L{_line_of(content, m.start())}:USING(true)")
+        for m in re.finditer(r'\bWITH\s+CHECK\s*\(\s*true\s*\)', content, re.IGNORECASE):
+            rls_findings.append(f"L{_line_of(content, m.start())}:WITH CHECK(true)")
+        if rls_findings:
+            sev = _sev('rls-permissive-policy', 'error')
+            if sev != 'off':
+                (errors if sev == 'error' else warnings).append(
+                    Finding('rls-permissive-policy', sev,
+                        f"Found {len(rls_findings)} row-level security policy condition(s) that allow "
+                        f"unconditional access: {', '.join(rls_findings[:8])}"
+                        f"{'...' if len(rls_findings) > 8 else ''}. "
+                        f"USING (true) / WITH CHECK (true) let anyone holding the anon key read or write "
+                        f"every row in the table. Scope the condition to the requesting user, e.g. "
+                        f"USING (auth.uid() = user_id).")
+                )
+        disable_matches = list(re.finditer(r'\bDISABLE\s+ROW\s+LEVEL\s+SECURITY\b', content, re.IGNORECASE))
+        if disable_matches:
+            sev = _sev('rls-disabled', 'error')
+            if sev != 'off':
+                lines = [f"L{_line_of(content, m.start())}" for m in disable_matches]
+                (errors if sev == 'error' else warnings).append(
+                    Finding('rls-disabled', sev,
+                        f"Found {len(disable_matches)} DISABLE ROW LEVEL SECURITY statement(s) "
+                        f"({', '.join(lines[:8])}). This turns off all row-level access control for the "
+                        f"table, exposing every row to anyone with the anon/public API key. Remove it "
+                        f"unless the table is genuinely meant to be fully public.")
+                )
+
+    # Check 27: Supabase service_role key hardcoded in source — ERROR.
+    # The service_role JWT bypasses row-level security entirely. It is meant
+    # to stay server-side only (env var / secrets manager); pasting it into
+    # frontend code or committing it exposes full unrestricted DB access to
+    # anyone who reads the bundle. Detected by decoding the JWT payload
+    # (no network call, no dependency) and checking for role=service_role,
+    # so it only fires on an actual key, not on the word "service_role".
+    if file_path.suffix in TEXT_EXTENSIONS and file_path.suffix != '.md' and not is_test_file:
+        for m in re.finditer(r'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}', content):
+            token = m.group(0)
+            parts = token.split('.')
+            if len(parts) != 3:
+                continue
+            try:
+                payload_raw = parts[1]
+                padded = payload_raw + '=' * (-len(payload_raw) % 4)
+                payload = json.loads(base64.urlsafe_b64decode(padded))
+            except Exception:
+                continue
+            if payload.get('role') == 'service_role':
+                sev = _sev('supabase-service-role-key-exposed', 'error')
+                if sev != 'off':
+                    line_num = _line_of(content, m.start())
+                    (errors if sev == 'error' else warnings).append(
+                        Finding('supabase-service-role-key-exposed', sev,
+                            f"L{line_num}: Supabase service_role key found hardcoded in source. "
+                            f"This key bypasses row-level security completely. Move it to a "
+                            f"server-only environment variable, remove it from this file, and "
+                            f"rotate the key in the Supabase dashboard immediately.")
+                    )
+                    break  # one finding per file is enough signal
 
     return errors, warnings
 

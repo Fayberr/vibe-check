@@ -1,7 +1,7 @@
 # vibe-check , AI agent usage guide
 
 ## What it is
-Single-file Python linter (stdlib only, zero dependencies) that catches 51 patterns
+Single-file Python linter (stdlib only, zero dependencies) that catches 54 patterns
 of AI-generated code smell in web projects. Runs on Python 3.9+.
 
 ## Quick install
@@ -94,7 +94,7 @@ Run only the fix commands for checks where status is needs_fix or not_installed:
 ```
 Severities: "error", "warn", "off". Use to suppress project-specific false positives.
 
-## What it checks (51 rules)
+## What it checks (54 rules)
 Domain & Branding (4): Vercel default domain URLs, text logos, default favicons, AI builder watermarks
 Design (7): purple gradients, stock photos, gradient hero text, scroll bloat, script fonts,
   emojis in UI, single-page traps
@@ -107,9 +107,9 @@ SEO & Accessibility (11): missing meta description, default tab titles,
   long titles, missing og:image, missing JSON-LD, H1 hierarchy,
   missing canonical (prod), missing sitemap/llms.txt (prod),
   missing lang attribute, missing alt text
-Security (11): XSS sinks, file upload gaps, unsigned webhooks, hardcoded secrets,
+Security (13): XSS sinks, file upload gaps, unsigned webhooks, hardcoded secrets,
   broken JWT validation, debug mode, unsafe deserialization, Math.random()
-  for security, missing security headers, SSRF, no rate limiting
+  for security, missing security headers, SSRF, no rate limiting, permissive/disabled SQL RLS policies, exposed Supabase service_role JWT
 + AI co-author trailer detection in git history (Rule 51)
 + Claude Code attribution settings check (claude-attribution rule)
 + Double-dash detection (-- used as prose dash)
