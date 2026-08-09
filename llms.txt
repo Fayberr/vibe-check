@@ -109,7 +109,8 @@ SEO & Accessibility (11): missing meta description, default tab titles,
   missing lang attribute, missing alt text
 Security (13): XSS sinks, file upload gaps, unsigned webhooks, hardcoded secrets,
   broken JWT validation, debug mode, unsafe deserialization, Math.random()
-  for security, missing security headers, SSRF, no rate limiting, permissive/disabled SQL RLS policies, exposed Supabase service_role JWT
+  for security, missing security headers, SSRF, no rate limiting,
+  permissive/disabled SQL RLS, exposed Supabase service_role key
 + AI co-author trailer detection in git history (Rule 51)
 + Claude Code attribution settings check (claude-attribution rule)
 + Double-dash detection (-- used as prose dash)
