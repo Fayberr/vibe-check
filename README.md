@@ -1,6 +1,6 @@
 # vibe-check
 
-**Catch AI-vibecoded slop before it ships.** A single-file, zero-dependency Python linter that detects 50 patterns of AI-generated code smell in web projects , from missing favicons to hardcoded API keys.
+**Catch AI-vibecoded slop before it ships.** A single-file, zero-dependency Python linter that detects 50 patterns of AI-generated code smell in web projects , from missing favicons to hardcoded API keys. It automates the mechanically-detectable part of the 50 Anti-Slop Rules standard.
 
 ```bash
 vibe-check ./my-project
@@ -46,75 +46,110 @@ cd vibe-check
 
 **Requirements:** Python 3.9+. Nothing else.
 
-## What It Checks (50 Rules)
+## What It Checks (50 automated rules)
 
-Each bullet below is a distinct `rule` id you'll see in `--json` output (shown in backticks). Rules
-marked **(prod)** only fire with `--prod`. Run `vibe-check --setup --json` to see rule severities,
-or list them all with `grep -oE "Finding\('[a-z-]+'" vibe-check`.
+vibe-check is built against the **50 Anti-Slop Rules**, a numbered standard for AI-generated web
+work. Not every rule in that standard is mechanically detectable, so the tool automates the 50
+concrete checks below and leaves [16 judgement-call rules](#specified-but-not-automated) to human
+or agent review. Spec rule numbers are given as **(Rule N)** where a check maps onto the standard;
+checks without one are vibe-check extensions that go beyond it.
+
+Each bullet is a distinct `rule` id you'll see in `--json` output (shown in backticks). Rules
+marked **(prod)** only fire with `--prod`. To list the ids straight from the source:
+`grep -oE "Finding\('[a-z-]+'" vibe-check | sort -u` , note that returns 51, because
+`html-parse-error` is an internal diagnostic rather than a slop rule.
 
 ### Domain & Branding
-- `vercel-urls` , hardcoded `vercel.app` URL in source
-- `ai-watermarks` , leftover AI builder watermarks ("Made with Lovable", "Created with v0", "built with bolt.new")
-- `missing-favicon` , no `<link rel="icon">` tag
-- `default-favicon` , default Vite/React placeholder favicon left in place
+- `vercel-urls` **(Rule 1)** , hardcoded `vercel.app` URL in source
+- `ai-watermarks` **(Rule 4)** , leftover AI builder watermarks ("Made with Lovable", "Created with v0", "built with bolt.new")
+- `missing-favicon` **(Rule 3)** , no `<link rel="icon">` tag
+- `default-favicon` **(Rule 3)** , default Vite/React placeholder favicon left in place
 
 ### Copywriting & Placeholder Content
-- `em-dashes` , em-dash (U+2014) characters in copy (auto-fixable)
+- `em-dashes` **(Rule 12)** , em-dash (U+2014) characters in copy (auto-fixable)
 - `double-dash` , `--` used as a prose dash, e.g. "great , this works" (auto-fixable)
-- `placeholder-copy` , unedited placeholder text ("John Doe", "Jane Smith", "Trusted by 10,000+ creators", "Lorem ipsum")
+- `placeholder-copy` **(Rules 14, 16)** , unedited placeholder text ("John Doe", "Jane Smith", "Trusted by 10,000+ creators", "Lorem ipsum")
 
 ### Design & UI Hygiene
-- `script-fonts` , cursive/script Google Font imports (Dancing Script, Pacifico, Great Vibes, Satisfy, Caveat)
-- `emoji-in-ui` , emoji characters in rendered page content, use SVG icons instead
+- `script-fonts` **(Rule 9)** , cursive/script Google Font imports (Dancing Script, Pacifico, Great Vibes, Satisfy, Caveat)
+- `emoji-in-ui` **(Rule 10)** , emoji characters in rendered page content, use SVG icons instead
 - `unstyled-selects` , `<select>` elements in JSX/TSX with no `className`
 - `inline-styles` , inline `style={{...}}` objects (use Tailwind/CSS modules)
 - `missing-input-autocomplete` , `<input type="password">` missing an `autocomplete` attribute
 
 ### SEO & Accessibility
-- `missing-meta-desc` , missing `<meta name="description">` tag
-- `default-title` , default framework tab title ("Vite + React")
-- `long-title` , page title over 24 characters (browser tabs truncate)
-- `missing-og-image` , missing `og:image` social preview tag
-- `missing-h1` , no `<h1>` element on the page
-- `multiple-h1` , more than one `<h1>` element on the page
-- `img-no-alt-html` , `<img>` in `.html` missing alt text
-- `img-no-alt` , `<img>` in JSX/TSX missing alt text
-- `missing-lang` , missing `lang` attribute on `<html>`
-- `missing-canonical` **(prod)** , missing `<link rel="canonical">`
-- `missing-sitemap` **(prod)** , no `sitemap.xml` found
-- `missing-llms-txt` **(prod)** , no `llms.txt` found
-- `missing-privacy-policy` **(prod)** , no Privacy Policy file/route found
-- `missing-terms` **(prod)** , no Terms & Conditions file/route found
-- `broken-buttons` , interactive elements with a dead `href="#"` target
+- `missing-meta-desc` **(Rule 30)** , missing `<meta name="description">` tag
+- `default-title` **(Rule 23)** , default framework tab title ("Vite + React")
+- `long-title` **(Rule 24)** , page title over 24 characters (browser tabs truncate)
+- `missing-og-image` **(Rule 32)** , missing `og:image` social preview tag
+- `missing-h1` **(Rule 34)** , no `<h1>` element on the page
+- `multiple-h1` **(Rule 34)** , more than one `<h1>` element on the page
+- `img-no-alt-html` **(Rule 38)** , `<img>` in `.html` missing alt text
+- `img-no-alt` **(Rule 38)** , `<img>` in JSX/TSX missing alt text
+- `missing-lang` **(Rule 37)** , missing `lang` attribute on `<html>`
+- `missing-canonical` **(Rule 35, prod)** , missing `<link rel="canonical">`
+- `missing-sitemap` **(Rule 36, prod)** , no `sitemap.xml` found
+- `missing-llms-txt` **(Rule 29, prod)** , no `llms.txt` found
+- `missing-privacy-policy` **(Rule 18, prod)** , no Privacy Policy file/route found
+- `missing-terms` **(Rule 19, prod)** , no Terms & Conditions file/route found
+- `broken-buttons` **(Rule 20)** , interactive elements with a dead `href="#"` target
 
 ### Technical & Code Quality
-- `console-log` , `console.log()` calls left in `.tsx` files
-- `exposed-source-maps` , `.map` files shipped in `dist`/`public`
+- `console-log` **(Rule 25)** , `console.log()` calls left in `.tsx` files
+- `exposed-source-maps` **(Rule 26)** , `.map` files shipped in `dist`/`public`
 - `dangerously-set-html` , `dangerouslySetInnerHTML` in JSX/TSX
 - `target-blank-noopener` , `target="_blank"` without `rel="noopener noreferrer"`
 - `as-type-casts` , `as` type casts in TypeScript (prefer type narrowing)
 - `tech-debt-markers` , TODO/FIXME/HACK comments
 
 ### Security
-- `xss-sinks` , `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, `eval()`, `v-html`, `javascript:` URLs
-- `file-upload-gaps` , `<input type="file">` without `accept`, multer without `fileFilter`, `express.static` over upload dirs
-- `unsigned-webhooks` , a file handles a webhook route but has no HMAC signature verification
-- `unsigned-webhooks-project` , same check, project-wide (webhook handler and verification live in different files)
-- `hardcoded-secrets` , API keys, DB credentials, private keys, access tokens, DB connection strings with embedded credentials
-- `broken-jwt` , `verify=False`, `algorithms=["none"]`, `ignoreExpiration:true`, `jwt.decode()` without algorithm pinning
-- `debug-mode` , `DEBUG=True`, `NODE_ENV=development`, Flask/Django/FastAPI debug flags left on
-- `unsafe-deserialization` , `pickle.loads()`, `yaml.load()` without `SafeLoader`, `torch.load()` without `weights_only`, `vm.runInNewContext()`
-- `math-random-security` , `Math.random()` used near token/auth/reset/session/csrf/nonce/otp context
-- `missing-security-headers` , Express without helmet, Flask without Talisman, FastAPI without Secure
-- `ssrf-user-urls` , unfiltered user input flowing into `fetch()`/`axios`/`requests`/`httpx`/`urllib`
-- `no-rate-limiting` , no rate-limiting middleware on an Express/Flask/FastAPI server
+- `xss-sinks` **(Rule 40)** , `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, `eval()`, `v-html`, `javascript:` URLs
+- `file-upload-gaps` **(Rule 41)** , `<input type="file">` without `accept`, multer without `fileFilter`, `express.static` over upload dirs
+- `unsigned-webhooks` **(Rule 42)** , a file handles a webhook route but has no HMAC signature verification
+- `unsigned-webhooks-project` **(Rule 42)** , same check, project-wide (webhook handler and verification live in different files)
+- `hardcoded-secrets` **(Rule 43)** , API keys, DB credentials, private keys, access tokens, DB connection strings with embedded credentials
+- `broken-jwt` **(Rule 44)** , `verify=False`, `algorithms=["none"]`, `ignoreExpiration:true`, `jwt.decode()` without algorithm pinning
+- `debug-mode` **(Rule 45)** , `DEBUG=True`, `NODE_ENV=development`, Flask/Django/FastAPI debug flags left on
+- `unsafe-deserialization` **(Rule 46)** , `pickle.loads()`, `yaml.load()` without `SafeLoader`, `torch.load()` without `weights_only`, `vm.runInNewContext()`
+- `math-random-security` **(Rule 47)** , `Math.random()` used near token/auth/reset/session/csrf/nonce/otp context
+- `missing-security-headers` **(Rule 48)** , Express without helmet, Flask without Talisman, FastAPI without Secure
+- `ssrf-user-urls` **(Rule 49)** , unfiltered user input flowing into `fetch()`/`axios`/`requests`/`httpx`/`urllib`
+- `no-rate-limiting` **(Rule 50)** , no rate-limiting middleware on an Express/Flask/FastAPI server
 - `rls-permissive-policy` , Supabase/Postgres `USING (true)` or `WITH CHECK (true)` unconditional RLS policy
 - `rls-disabled` , `DISABLE ROW LEVEL SECURITY` in a SQL migration
 - `supabase-service-role-key-exposed` , a decoded JWT with `role: "service_role"` hardcoded in source
 
 ### Git & AI-Attribution Hygiene
-- `ai-co-author-trailers` , `Co-Authored-By: Claude/GPT/Gemini/Copilot/Codex` trailers in git commit history
+- `ai-co-author-trailers` **(Rule 51)** , `Co-Authored-By: Claude/GPT/Gemini/Copilot/Codex` trailers in git commit history
 - `claude-attribution` , `~/.claude/settings.json` leaves AI co-author trailers enabled (`--fix` corrects this at the source)
+
+### Specified but not automated
+
+These 16 rules are part of the 50 Anti-Slop Rules standard but are **not** detected by vibe-check.
+Most need visual, semantic, or build-time judgement that a regex pass can't make honestly, and a
+check that fires on "is this headline a buzzword?" would be mostly false positives. They stay on
+the human/agent review checklist, and double as the roadmap for future checks:
+
+| Rule | Standard says | Why not automated (yet) |
+|------|---------------|-------------------------|
+| 2 | No text-only unbranded logos | Needs visual/asset judgement |
+| 5 | No generic purple/indigo gradients | Palette intent is contextual; naive hex matching punishes deliberate branding |
+| 6 | No AI-slop stock photos / synthetic avatars | Needs image analysis |
+| 7 | No generic gradient hero typography | Visual judgement |
+| 8 | No scroll animation bloat (Framer Motion / AOS) | "Excessive" is a threshold call, not a pattern match |
+| 11 | No single-page traps for complex apps | Requires understanding app scope |
+| 13 | No vague buzzword hero headlines | Semantic judgement, high false-positive risk |
+| 15 | No fake live visitor badges | Needs semantic reading of the component |
+| 17 | No fake metric counter bars | Needs semantic reading of the component |
+| 21 | No empty View Source (SSR/fallback) | Requires rendering the page |
+| 22 | No missing 404 page | Router-dependent, varies per framework |
+| 27 | No massive unoptimized JS bundles (>500KB) | Requires a build step; vibe-check is static-only |
+| 28 | No AI-blocked `robots.txt` unless intended | Intent-dependent |
+| 31 | No identical `<title>` tags across pages | Needs cross-page correlation (planned, feasible) |
+| 33 | No missing JSON-LD structured data | Feasible, simply not implemented yet |
+| 39 | No unhandled hydration / client-side errors | Requires running the app |
+
+Rules 31 and 33 are the two genuinely mechanical gaps and the best candidates to implement next.
 
 ## Output
 

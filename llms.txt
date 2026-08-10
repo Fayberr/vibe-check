@@ -3,6 +3,8 @@
 ## What it is
 Single-file Python linter (stdlib only, zero dependencies) that catches 50 patterns
 of AI-generated code smell in web projects. Runs on Python 3.9+.
+It automates the mechanically-detectable subset of a 50-rule anti-slop standard; 16 further
+rules in that standard need human/agent judgement (see "Rules the tool does NOT check" below).
 
 ## Quick install
 ```bash
@@ -118,6 +120,29 @@ Git & AI-Attribution Hygiene (2): ai-co-author-trailers (AI co-author trailers i
   claude-attribution (~/.claude/settings.json still allows trailers)
 
 Full rule id -> description list: see README.md "What It Checks" section.
+
+## Rules the tool does NOT check (important for agents)
+vibe-check automates the mechanically-detectable subset of a 50-rule anti-slop standard.
+These 16 standard rules are NOT automated, so a clean vibe-check run does NOT mean they pass.
+Review them yourself before declaring a web project done:
+  2  no text-only unbranded logos
+  5  no generic purple/indigo gradient palettes
+  6  no AI-slop stock photos / synthetic avatars
+  7  no generic gradient hero typography
+  8  no scroll animation bloat (Framer Motion / AOS)
+  11 no single-page traps for complex apps
+  13 no vague buzzword hero headlines
+  15 no fake live visitor badges
+  17 no fake metric counter bars
+  21 no empty View Source (SSR/fallback content)
+  22 no missing 404 page
+  27 no massive unoptimized JS bundles (>500KB chunks)
+  28 no AI-blocked robots.txt unless intended
+  31 no identical <title> tags across pages
+  33 no missing JSON-LD structured data
+  39 no unhandled hydration / client-side errors
+Treat these as a manual checklist. Do not report a project as fully compliant on the basis of
+a passing vibe-check alone.
 
 ## When scan finds issues
 1. Parse `findings` array from JSON output
