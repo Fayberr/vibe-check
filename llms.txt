@@ -1,7 +1,7 @@
 # vibe-check , AI agent usage guide
 
 ## What it is
-Single-file Python linter (stdlib only, zero dependencies) that catches 54 patterns
+Single-file Python linter (stdlib only, zero dependencies) that catches 50 patterns
 of AI-generated code smell in web projects. Runs on Python 3.9+.
 
 ## Quick install
@@ -88,32 +88,36 @@ Run only the fix commands for checks where status is needs_fix or not_installed:
 | `--changed` | Only scan files changed since last commit |
 
 ## Config file
-`.vibecheckrc` in project root: JSON object mapping rule IDs to severity overrides.
+`.vibecheckrc` (or `.vibe-check.json`) in project root: JSON object mapping rule IDs to
+severity overrides. Both a flat form and a nested `rules` form are accepted:
 ```json
-{"scroll-animation-bloat": "warn", "emojis-in-ui": "off"}
+{"em-dashes": "off", "console-log": "warn"}
+```
+```json
+{"rules": {"em-dashes": "off", "console-log": "warn"}}
 ```
 Severities: "error", "warn", "off". Use to suppress project-specific false positives.
+Rule IDs must match exactly, see the list below or run `--json` and read the `rule` field.
 
-## What it checks (54 rules)
-Domain & Branding (4): Vercel default domain URLs, text logos, default favicons, AI builder watermarks
-Design (7): purple gradients, stock photos, gradient hero text, scroll bloat, script fonts,
-  emojis in UI, single-page traps
-Copywriting (7): em-dashes, buzzword heroes, fake testimonials, fake visitor badges,
-  fake customer counts, fake metrics, missing legal pages (prod)
-Technical (10): broken buttons, source maps, console spam, unstyled selects,
-  unsanitized innerHTML, target=_blank without noopener, inline styles,
-  TypeScript as-casts, tech-debt markers, placeholder copy
-SEO & Accessibility (11): missing meta description, default tab titles,
-  long titles, missing og:image, missing JSON-LD, H1 hierarchy,
-  missing canonical (prod), missing sitemap/llms.txt (prod),
-  missing lang attribute, missing alt text
-Security (13): XSS sinks, file upload gaps, unsigned webhooks, hardcoded secrets,
-  broken JWT validation, debug mode, unsafe deserialization, Math.random()
-  for security, missing security headers, SSRF, no rate limiting,
-  permissive/disabled SQL RLS, exposed Supabase service_role key
-+ AI co-author trailer detection in git history (Rule 51)
-+ Claude Code attribution settings check (claude-attribution rule)
-+ Double-dash detection (-- used as prose dash)
+## What it checks (50 rules)
+Domain & Branding (4): vercel-urls, ai-watermarks, missing-favicon, default-favicon
+Copywriting & Placeholder Content (3): em-dashes, double-dash, placeholder-copy
+Design & UI Hygiene (5): script-fonts, emoji-in-ui, unstyled-selects, inline-styles,
+  missing-input-autocomplete
+SEO & Accessibility (15): missing-meta-desc, default-title, long-title, missing-og-image,
+  missing-h1, multiple-h1, img-no-alt-html, img-no-alt, missing-lang, missing-canonical (prod),
+  missing-sitemap (prod), missing-llms-txt (prod), missing-privacy-policy (prod),
+  missing-terms (prod), broken-buttons
+Technical & Code Quality (6): console-log, exposed-source-maps, dangerously-set-html,
+  target-blank-noopener, as-type-casts, tech-debt-markers
+Security (15): xss-sinks, file-upload-gaps, unsigned-webhooks, unsigned-webhooks-project,
+  hardcoded-secrets, broken-jwt, debug-mode, unsafe-deserialization, math-random-security,
+  missing-security-headers, ssrf-user-urls, no-rate-limiting, rls-permissive-policy,
+  rls-disabled, supabase-service-role-key-exposed
+Git & AI-Attribution Hygiene (2): ai-co-author-trailers (AI co-author trailers in git history),
+  claude-attribution (~/.claude/settings.json still allows trailers)
+
+Full rule id -> description list: see README.md "What It Checks" section.
 
 ## When scan finds issues
 1. Parse `findings` array from JSON output
@@ -131,6 +135,6 @@ This tool provides 5 layers. Recommended: apply all applicable ones on first run
 2. Commit-msg hook: `vibe-check --install-hooks` (client-side , blocks commits with trailers)
 3. Pre-receive hook: `vibe-check --install-hooks --server <dir>` (server-side , blocks pushes, cannot be bypassed)
 4. Stop-hook scan: automatic in Claude Code sessions (session-end detection)
-5. Rule 51: built-in git history scan (retroactive detection)
+5. `ai-co-author-trailers` rule: built-in git history scan (retroactive detection)
 
 Layers 1-2 work everywhere. Layer 3 requires a self-hosted git server. Layer 4 is Claude Code-specific.
