@@ -123,6 +123,173 @@ const SUPABASE_KEY = "{anon_jwt}";
     finally:
         shutil.rmtree(tmp_dir)
 
+def _findings_for(out, rule):
+    return [f for f in out.get("findings", []) if f["rule"] == rule]
+
+
+SEO_PAGE = ('<html lang="en"><head><title>Shop</title>'
+            '<meta name="description" content="A shop that sells things.">'
+            '{extra}</head><body><h1>Shop</h1></body></html>')
+
+
+def test_json_ld_missing():
+    """Rule 33: prod-mode SEO pages without JSON-LD structured data."""
+    tmp_dir = Path(tempfile.mkdtemp(prefix="vibe_test_jsonld_"))
+    try:
+        (tmp_dir / "index.html").write_text(SEO_PAGE.format(extra=""))
+        code, out = run_vibe_check(tmp_dir, ["--prod"])
+        assert len(_findings_for(out, "json-ld-missing")) == 1, \
+            f"Expected 1 json-ld-missing finding, got {out}"
+
+        # With JSON-LD present it must not fire.
+        (tmp_dir / "index.html").write_text(SEO_PAGE.format(
+            extra='<script type="application/ld+json">'
+                  '{"@context":"https://schema.org"}</script>'))
+        code, out = run_vibe_check(tmp_dir, ["--prod", "--no-cache"])
+        assert len(_findings_for(out, "json-ld-missing")) == 0, \
+            f"json-ld-missing fired despite ld+json present: {out}"
+
+        # Must be production-only, silent in normal mode.
+        (tmp_dir / "index.html").write_text(SEO_PAGE.format(extra=""))
+        code, out = run_vibe_check(tmp_dir, ["--no-cache"])
+        assert len(_findings_for(out, "json-ld-missing")) == 0, \
+            "json-ld-missing should only fire with --prod"
+
+        # An app shell with no SEO metadata at all (extension popup, Electron
+        # window) is not an indexable page, so structured data is meaningless.
+        (tmp_dir / "index.html").write_text(
+            '<html lang="en"><head><title>Popup</title></head>'
+            '<body><h1>Popup</h1><div id="root"></div></body></html>')
+        code, out = run_vibe_check(tmp_dir, ["--prod", "--no-cache"])
+        assert len(_findings_for(out, "json-ld-missing")) == 0, \
+            f"json-ld-missing fired on a non-SEO app shell: {out}"
+        print("  PASS  json-ld-missing fires on SEO pages only, in prod only")
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
+def test_oversized_bundle():
+    """Rule 27: shipped JS chunks over 500KB."""
+    tmp_dir = Path(tempfile.mkdtemp(prefix="vibe_test_bundle_"))
+    try:
+        dist = tmp_dir / "dist"
+        dist.mkdir()
+        (dist / "small.js").write_text("console.info('ok');\n")
+        code, out = run_vibe_check(tmp_dir)
+        assert len(_findings_for(out, "oversized-bundle")) == 0, \
+            f"oversized-bundle fired on a small chunk: {out}"
+
+        (dist / "vendor.js").write_text("var a=1;" * 70000)
+        assert (dist / "vendor.js").stat().st_size > 500 * 1024
+        code, out = run_vibe_check(tmp_dir, ["--no-cache"])
+        found = _findings_for(out, "oversized-bundle")
+        assert len(found) == 1, f"Expected 1 oversized-bundle finding, got {out}"
+        assert "vendor.js" in found[0]["message"]
+        assert found[0]["severity"] == "warn"
+        print("  PASS  oversized-bundle detects >500KB chunk, ignores small ones")
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
+def test_robots_blocks_crawlers():
+    """Rule 28: robots.txt de-indexing the whole site."""
+    tmp_dir = Path(tempfile.mkdtemp(prefix="vibe_test_robots_"))
+    try:
+        (tmp_dir / "robots.txt").write_text("User-agent: *\nDisallow: /\n")
+        code, out = run_vibe_check(tmp_dir)
+        found = _findings_for(out, "robots-blocks-crawlers")
+        assert len(found) == 1, f"Expected 1 robots finding, got {out}"
+        assert "every crawler" in found[0]["message"]
+
+        # A normal robots.txt must stay silent.
+        (tmp_dir / "robots.txt").write_text(
+            "User-agent: *\nDisallow: /admin/\nSitemap: https://x.dev/sitemap.xml\n")
+        code, out = run_vibe_check(tmp_dir, ["--no-cache"])
+        assert len(_findings_for(out, "robots-blocks-crawlers")) == 0, \
+            f"robots rule fired on a healthy robots.txt: {out}"
+
+        # Blocking only AI crawlers is a deliberate choice, not a finding.
+        (tmp_dir / "robots.txt").write_text(
+            "User-agent: GPTBot\nDisallow: /\n\nUser-agent: *\nDisallow:\n")
+        code, out = run_vibe_check(tmp_dir, ["--no-cache"])
+        assert len(_findings_for(out, "robots-blocks-crawlers")) == 0, \
+            f"robots rule should not fire on AI-only blocks: {out}"
+        print("  PASS  robots-blocks-crawlers flags full block, allows AI-only block")
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
+def test_generic_gradient_palette():
+    """Rule 5: default purple/indigo gradient palette."""
+    tmp_dir = Path(tempfile.mkdtemp(prefix="vibe_test_palette_"))
+    try:
+        (tmp_dir / "hero.css").write_text(
+            ".hero { background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%); }\n")
+        code, out = run_vibe_check(tmp_dir)
+        found = _findings_for(out, "generic-gradient-palette")
+        assert len(found) == 1, f"Expected 1 palette finding, got {out}"
+        assert found[0]["severity"] == "warn"
+
+        # Tailwind form.
+        (tmp_dir / "hero.css").unlink()
+        (tmp_dir / "Hero.tsx").write_text(
+            'export const Hero = () => <div className="bg-gradient-to-r '
+            'from-indigo-500 to-purple-500">hi</div>;\n')
+        code, out = run_vibe_check(tmp_dir, ["--no-cache"])
+        assert len(_findings_for(out, "generic-gradient-palette")) == 1, \
+            f"Expected Tailwind palette finding, got {out}"
+
+        # The same hex outside a gradient is a legitimate brand colour.
+        (tmp_dir / "Hero.tsx").unlink()
+        (tmp_dir / "brand.css").write_text(".btn { color: #6366f1; }\n")
+        code, out = run_vibe_check(tmp_dir, ["--no-cache"])
+        assert len(_findings_for(out, "generic-gradient-palette")) == 0, \
+            f"palette rule fired on a non-gradient colour: {out}"
+        print("  PASS  generic-gradient-palette flags gradients only, not brand colours")
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
+def test_gradient_hero_text():
+    """Rule 7: gradient-filled hero typography."""
+    tmp_dir = Path(tempfile.mkdtemp(prefix="vibe_test_gradtext_"))
+    try:
+        (tmp_dir / "Hero.tsx").write_text(
+            'export const H = () => <h1 className="bg-gradient-to-r from-blue-400 '
+            'to-teal-400 bg-clip-text text-transparent">Ship</h1>;\n')
+        code, out = run_vibe_check(tmp_dir)
+        found = _findings_for(out, "gradient-hero-text")
+        assert len(found) == 1, f"Expected 1 gradient-hero-text finding, got {out}"
+
+        # bg-clip-text without a gradient is not the trope.
+        (tmp_dir / "Hero.tsx").write_text(
+            'export const H = () => <h1 className="bg-clip-text">Ship</h1>;\n')
+        code, out = run_vibe_check(tmp_dir, ["--no-cache"])
+        assert len(_findings_for(out, "gradient-hero-text")) == 0, \
+            f"gradient-hero-text fired without a gradient: {out}"
+        print("  PASS  gradient-hero-text needs clip+transparent+gradient together")
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
+def test_new_rules_are_suppressible():
+    """Every new rule must be turn-off-able from .vibecheckrc."""
+    tmp_dir = Path(tempfile.mkdtemp(prefix="vibe_test_suppress_"))
+    try:
+        (tmp_dir / "hero.css").write_text(
+            ".hero { background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%); }\n")
+        (tmp_dir / "robots.txt").write_text("User-agent: *\nDisallow: /\n")
+        (tmp_dir / ".vibecheckrc").write_text(
+            '{"rules": {"generic-gradient-palette": "off", '
+            '"robots-blocks-crawlers": "off"}}')
+        code, out = run_vibe_check(tmp_dir)
+        assert len(_findings_for(out, "generic-gradient-palette")) == 0
+        assert len(_findings_for(out, "robots-blocks-crawlers")) == 0
+        print("  PASS  new rules respect .vibecheckrc severity overrides")
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
 if __name__ == "__main__":
     print("Testing SQL RLS and Supabase service_role rules...")
     test_rls_permissive_policy()
@@ -130,5 +297,12 @@ if __name__ == "__main__":
     test_sql_double_dash_ignored()
     test_supabase_service_role_key_exposed()
     test_supabase_anon_key_allowed()
+    print("\nTesting Tier 1 automated standard rules...")
+    test_json_ld_missing()
+    test_oversized_bundle()
+    test_robots_blocks_crawlers()
+    test_generic_gradient_palette()
+    test_gradient_hero_text()
+    test_new_rules_are_suppressible()
     print("========================================================")
     print("All rule tests passed cleanly!")

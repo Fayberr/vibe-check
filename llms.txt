@@ -1,9 +1,9 @@
 # vibe-check , AI agent usage guide
 
 ## What it is
-Single-file Python linter (stdlib only, zero dependencies) that catches 50 patterns
+Single-file Python linter (stdlib only, zero dependencies) that catches 55 patterns
 of AI-generated code smell in web projects. Runs on Python 3.9+.
-It automates the mechanically-detectable subset of a 50-rule anti-slop standard; 16 further
+It automates the mechanically-detectable subset of a 50-rule anti-slop standard; 11 further
 rules in that standard need human/agent judgement (see "Rules the tool does NOT check" below).
 
 ## Quick install
@@ -101,17 +101,17 @@ severity overrides. Both a flat form and a nested `rules` form are accepted:
 Severities: "error", "warn", "off". Use to suppress project-specific false positives.
 Rule IDs must match exactly, see the list below or run `--json` and read the `rule` field.
 
-## What it checks (50 rules)
+## What it checks (55 rules)
 Domain & Branding (4): vercel-urls, ai-watermarks, missing-favicon, default-favicon
 Copywriting & Placeholder Content (3): em-dashes, double-dash, placeholder-copy
-Design & UI Hygiene (5): script-fonts, emoji-in-ui, unstyled-selects, inline-styles,
-  missing-input-autocomplete
-SEO & Accessibility (15): missing-meta-desc, default-title, long-title, missing-og-image,
+Design & UI Hygiene (7): script-fonts, emoji-in-ui, unstyled-selects, inline-styles,
+  missing-input-autocomplete, generic-gradient-palette, gradient-hero-text
+SEO & Accessibility (17): missing-meta-desc, default-title, long-title, missing-og-image,
   missing-h1, multiple-h1, img-no-alt-html, img-no-alt, missing-lang, missing-canonical (prod),
   missing-sitemap (prod), missing-llms-txt (prod), missing-privacy-policy (prod),
-  missing-terms (prod), broken-buttons
-Technical & Code Quality (6): console-log, exposed-source-maps, dangerously-set-html,
-  target-blank-noopener, as-type-casts, tech-debt-markers
+  missing-terms (prod), broken-buttons, json-ld-missing (prod), robots-blocks-crawlers
+Technical & Code Quality (7): console-log, exposed-source-maps, dangerously-set-html,
+  target-blank-noopener, as-type-casts, tech-debt-markers, oversized-bundle
 Security (15): xss-sinks, file-upload-gaps, unsigned-webhooks, unsigned-webhooks-project,
   hardcoded-secrets, broken-jwt, debug-mode, unsafe-deserialization, math-random-security,
   missing-security-headers, ssrf-user-urls, no-rate-limiting, rls-permissive-policy,
@@ -123,12 +123,10 @@ Full rule id -> description list: see README.md "What It Checks" section.
 
 ## Rules the tool does NOT check (important for agents)
 vibe-check automates the mechanically-detectable subset of a 50-rule anti-slop standard.
-These 16 standard rules are NOT automated, so a clean vibe-check run does NOT mean they pass.
+These 11 standard rules are NOT automated, so a clean vibe-check run does NOT mean they pass.
 Review them yourself before declaring a web project done:
   2  no text-only unbranded logos
-  5  no generic purple/indigo gradient palettes
   6  no AI-slop stock photos / synthetic avatars
-  7  no generic gradient hero typography
   8  no scroll animation bloat (Framer Motion / AOS)
   11 no single-page traps for complex apps
   13 no vague buzzword hero headlines
@@ -136,13 +134,21 @@ Review them yourself before declaring a web project done:
   17 no fake metric counter bars
   21 no empty View Source (SSR/fallback content)
   22 no missing 404 page
-  27 no massive unoptimized JS bundles (>500KB chunks)
-  28 no AI-blocked robots.txt unless intended
   31 no identical <title> tags across pages
-  33 no missing JSON-LD structured data
   39 no unhandled hydration / client-side errors
 Treat these as a manual checklist. Do not report a project as fully compliant on the basis of
 a passing vibe-check alone.
+
+Partially automated (the check catches the unambiguous case, you still judge the rest):
+  5  generic-gradient-palette flags the exact indigo/violet/purple AI palette in a gradient.
+     A gradient in other colours, or those hues used outside a gradient, is not flagged.
+  7  gradient-hero-text flags gradient-filled text. Whether it is tasteful is still your call.
+  27 oversized-bundle stats built chunks >500KB. It cannot tell you WHY the bundle is large.
+  28 robots-blocks-crawlers flags a site-wide Disallow: / for *, Googlebot or Bingbot.
+     Blocking only AI crawlers is treated as deliberate and never flagged.
+  33 json-ld-missing fires only on pages that are already SEO surfaces (they have a description,
+     og: tags or a canonical). It does not check whether existing JSON-LD is correct or complete.
+All five default to "warn", never "error".
 
 ## When scan finds issues
 1. Parse `findings` array from JSON output

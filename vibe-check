@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 from html.parser import HTMLParser
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # --- Color formatting for CLI ---
 RED = "\033[91m"
@@ -231,6 +231,125 @@ exit 0
 """
 
 
+def _resolve_sev(config, rule_id, default):
+    """Resolve a rule's effective severity: 'error', 'warn', or 'off'.
+
+    Shared by the per-file checks and the project-level ones, so every rule is
+    suppressible from .vibecheckrc the same way. Accepts both the flat form
+    ({"rule-id": "off"}) and the nested form ({"rules": {"rule-id": "off"}}).
+    """
+    if not config:
+        return default
+    rules = config.get('rules')
+    if isinstance(rules, dict) and rule_id in rules:
+        return rules[rule_id]
+    return config.get(rule_id, default)
+
+
+def _check_oversized_bundles(target_dir, config):
+    """Rule 27: shipped JS chunks over 500KB.
+
+    Needs no build step and no parsing: the build output is already on disk if
+    there is one, so this is a stat() over the usual output directories. Only
+    fires when a build has actually been produced.
+    """
+    sev = _resolve_sev(config, 'oversized-bundle', 'warn')
+    if sev == 'off':
+        return []
+    limit = 500 * 1024
+    findings = []
+    for out_dir in ('dist', 'build', 'out', 'public'):
+        base = target_dir / out_dir
+        if not base.is_dir():
+            continue
+        for path in base.rglob('*'):
+            if not path.is_file() or path.suffix not in ('.js', '.mjs', '.cjs'):
+                continue
+            # Only look at directories *below* the output dir. The output dir
+            # itself is in EXCLUDE_DIRS (we never lint build artifacts), but
+            # here that is exactly what we came to stat().
+            if any(part in EXCLUDE_DIRS
+                   for part in path.relative_to(base).parts[:-1]):
+                continue
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            if size > limit:
+                rel = path.relative_to(target_dir)
+                findings.append((rel, size))
+    if not findings:
+        return []
+    findings.sort(key=lambda t: -t[1])
+    listed = ', '.join(f"{r} ({s // 1024}KB)" for r, s in findings[:5])
+    return [Finding('oversized-bundle', sev,
+        f"Found {len(findings)} JavaScript chunk(s) over 500KB: {listed}"
+        f"{'...' if len(findings) > 5 else ''}. "
+        f"Large bundles delay first paint on mobile. Code-split with dynamic "
+        f"import(), enable tree-shaking, and check for accidentally bundled "
+        f"dependencies (moment, lodash, icon sets).")]
+
+
+def _check_robots_txt(target_dir, config):
+    """Rule 28: robots.txt that blocks crawling of the whole site.
+
+    Deliberately narrow. Blocking AI crawlers (GPTBot, CCBot, ...) is very often
+    a deliberate choice, so that alone is NOT flagged; it is only mentioned as
+    context when the site is already blocking everyone. What IS flagged is a
+    wildcard or major-search-engine 'Disallow: /', which de-indexes the site and
+    is nearly always a staging config that shipped by accident.
+    """
+    sev = _resolve_sev(config, 'robots-blocks-crawlers', 'warn')
+    if sev == 'off':
+        return []
+    robots = target_dir / 'robots.txt'
+    if not robots.is_file():
+        return []
+    try:
+        text = robots.read_text(encoding='utf-8', errors='ignore')
+    except OSError:
+        return []
+
+    groups = {}
+    pending = []
+    last_was_agent = False
+    for raw in text.splitlines():
+        line = raw.split('#', 1)[0].strip()
+        if not line or ':' not in line:
+            continue
+        key, _, val = line.partition(':')
+        key, val = key.strip().lower(), val.strip()
+        if key == 'user-agent':
+            if not last_was_agent:
+                pending = []
+            pending.append(val.lower())
+            groups.setdefault(val.lower(), [])
+            last_was_agent = True
+        elif key == 'disallow':
+            last_was_agent = False
+            for agent in pending:
+                groups.setdefault(agent, []).append(val)
+
+    def blocks_root(agent):
+        return '/' in groups.get(agent, [])
+
+    blocked = [a for a in ('*', 'googlebot', 'bingbot') if blocks_root(a)]
+    if not blocked:
+        return []
+
+    ai_agents = ('gptbot', 'ccbot', 'claudebot', 'anthropic-ai', 'google-extended',
+                 'perplexitybot', 'bytespider')
+    also_ai = [a for a in ai_agents if blocks_root(a)]
+    extra = (f" (AI crawlers also blocked: {', '.join(also_ai)})" if also_ai else "")
+    scope = ("every crawler" if '*' in blocked
+             else "major search engines: " + ', '.join(blocked))
+    return [Finding('robots-blocks-crawlers', sev,
+        f"robots.txt blocks {scope} from the entire site (Disallow: /){extra}. "
+        f"This de-indexes the site completely. If this is a staging config that "
+        f"shipped by accident, remove it; if it is deliberate, set "
+        f"\"robots-blocks-crawlers\": \"off\" in .vibecheckrc.")]
+
+
 def _load_config(target_dir):
     """Load .vibecheckrc (JSON) from target_dir if it exists.
 
@@ -439,10 +558,17 @@ class SimpleHTMLInspector(HTMLParser):
         self.has_lang = False
         self.images_missing_alt = 0
         self.broken_hash_buttons = 0
+        self.has_json_ld = False
 
     def handle_starttag(self, tag, attrs):
         attrs_dict = dict(attrs)
-        
+
+        if tag == "script":
+            # Rule 33: JSON-LD structured data. Only the ld+json type counts;
+            # a plain <script> is not structured data.
+            if attrs_dict.get("type", "").strip().lower() == "application/ld+json":
+                self.has_json_ld = True
+
         if tag == "html":
             if "lang" in attrs_dict and attrs_dict["lang"].strip():
                 self.has_lang = True
@@ -500,12 +626,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
 
     def _sev(rule_id, default):
         """Resolve effective severity: 'error', 'warn', or 'off'."""
-        if config is None:
-            return default
-        rules = config.get('rules')
-        if isinstance(rules, dict) and rule_id in rules:
-            return rules[rule_id]
-        return config.get(rule_id, default)
+        return _resolve_sev(config, rule_id, default)
 
     try:
         content = file_path.read_text(encoding="utf-8", errors="ignore")
@@ -1538,6 +1659,93 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                     )
                     break  # one finding per file is enough signal
 
+    # Check 28: Generic purple/indigo gradient palette — WARN.
+    # The default "AI startup landing page" palette. Deliberately narrow: only
+    # the three exact hexes named in the standard (Tailwind indigo-500,
+    # violet-500, purple-500) and only inside an actual gradient, or the
+    # equivalent Tailwind from-/to- pairing. A project using purple as a real
+    # brand colour outside a gradient is not flagged.
+    STYLE_EXTS = (".css", ".scss", ".sass", ".less", ".html", ".htm",
+                  ".tsx", ".jsx", ".ts", ".js", ".vue", ".svelte", ".astro")
+    if file_path.suffix in STYLE_EXTS and not is_test_file:
+        palette_hits = []
+        generic_hexes = ('#6366f1', '#8b5cf6', '#a855f7')
+        # Pattern A: one of the hexes inside a CSS gradient function.
+        for m in re.finditer(r'(?:linear|radial|conic)-gradient\s*\(', content, re.IGNORECASE):
+            if _is_comment(content, m.start()):
+                continue
+            # Grab the gradient's argument list (bounded, brace-tracked).
+            depth = 0
+            grad_text = content[m.start():m.start() + 400]
+            for i, ch in enumerate(content[m.end() - 1:m.end() + 400]):
+                if ch == '(':
+                    depth += 1
+                elif ch == ')':
+                    depth -= 1
+                    if depth == 0:
+                        grad_text = content[m.start():m.end() + i]
+                        break
+            low = grad_text.lower()
+            found_hex = [h for h in generic_hexes if h in low]
+            if found_hex:
+                palette_hits.append(f"L{_line_of(content, m.start())}:{found_hex[0]}")
+        # Pattern B: Tailwind gradient with a purple/indigo/violet from-/to- pair.
+        for m in re.finditer(r'bg-gradient-to-[a-z]{1,2}\b', content):
+            if _is_comment(content, m.start()):
+                continue
+            window = content[max(0, m.start() - 120):m.start() + 200]
+            has_from = re.search(r'\bfrom-(?:indigo|violet|purple)-\d{2,3}\b', window)
+            has_to = re.search(r'\bto-(?:indigo|violet|purple|fuchsia|pink)-\d{2,3}\b', window)
+            if has_from and has_to:
+                palette_hits.append(
+                    f"L{_line_of(content, m.start())}:{has_from.group(0)}/{has_to.group(0)}")
+        if palette_hits:
+            sev = _sev('generic-gradient-palette', 'warn')
+            if sev != 'off':
+                (errors if sev == 'error' else warnings).append(
+                    Finding('generic-gradient-palette', sev,
+                        f"Found {len(palette_hits)} generic purple/indigo gradient(s): "
+                        f"{', '.join(palette_hits[:8])}"
+                        f"{'...' if len(palette_hits) > 8 else ''}. "
+                        f"This is the default AI-generated landing page palette. "
+                        f"Use colours from your own brand system instead.")
+                )
+
+    # Check 29: Generic gradient hero typography — WARN.
+    # `bg-clip-text` + `text-transparent` over a gradient (or the raw CSS
+    # equivalent) is *the* gradient-text idiom, so matching it is precise
+    # rather than a guess. Flagged as taste, not correctness: it is the single
+    # most overused AI hero treatment.
+    if file_path.suffix in STYLE_EXTS and not is_test_file:
+        gradient_text_hits = []
+        # Tailwind: bg-clip-text + text-transparent + a gradient, same element.
+        for m in re.finditer(r'\bbg-clip-text\b', content):
+            if _is_comment(content, m.start()):
+                continue
+            window = content[max(0, m.start() - 200):m.start() + 200]
+            if 'text-transparent' in window and 'bg-gradient-to-' in window:
+                gradient_text_hits.append(f"L{_line_of(content, m.start())}:tailwind")
+        # Raw CSS: -webkit-background-clip:text + transparent fill + gradient.
+        for m in re.finditer(r'-webkit-background-clip\s*:\s*text', content, re.IGNORECASE):
+            if _is_comment(content, m.start()):
+                continue
+            window = content[max(0, m.start() - 400):m.start() + 400]
+            if re.search(r'-webkit-text-fill-color\s*:\s*transparent', window, re.IGNORECASE) \
+                    and re.search(r'(?:linear|radial|conic)-gradient', window, re.IGNORECASE):
+                gradient_text_hits.append(f"L{_line_of(content, m.start())}:css")
+        if gradient_text_hits:
+            sev = _sev('gradient-hero-text', 'warn')
+            if sev != 'off':
+                (errors if sev == 'error' else warnings).append(
+                    Finding('gradient-hero-text', sev,
+                        f"Found {len(gradient_text_hits)} gradient-filled text treatment(s): "
+                        f"{', '.join(gradient_text_hits[:8])}"
+                        f"{'...' if len(gradient_text_hits) > 8 else ''}. "
+                        f"Gradient hero typography is the most overused AI landing page "
+                        f"trope. Use a solid colour unless the gradient is part of a "
+                        f"deliberate brand system.")
+                )
+
     return errors, warnings
 
 def check_html_file(file_path: Path, is_prod: bool = False):
@@ -1615,6 +1823,22 @@ def check_html_file(file_path: Path, is_prod: bool = False):
 
     if is_prod and not parser.has_canonical:
         warnings.append(Finding('missing-canonical', "warn", "Missing <link rel='canonical'> tag."))
+
+    # Rule 33: missing JSON-LD structured data. Production-only, matching the
+    # canonical-tag check above: structured data is a published-page concern,
+    # and flagging every partial/fragment during development would be noise.
+    # Narrowed further to pages that are actually SEO surfaces, i.e. that already
+    # carry a description, og: tags or a canonical. A page with no SEO metadata
+    # at all is an app shell (extension popup, Electron window, dashboard) where
+    # structured data is meaningless , and if it *should* have been indexable,
+    # missing-meta-desc already says so without this piling on.
+    is_seo_surface = (parser.has_meta_desc or parser.has_og_image
+                      or parser.has_canonical)
+    if is_prod and is_seo_surface and not parser.has_json_ld:
+        warnings.append(Finding('json-ld-missing', "warn",
+            "No JSON-LD structured data found (<script type=\"application/ld+json\">). "
+            "Search engines use it for rich results. Add an Organization, WebSite, "
+            "Product, or Article schema describing this page."))
 
     return errors, warnings
 
@@ -1812,6 +2036,25 @@ def scan_directory(target_dir: Path, is_prod: bool = False, fix: bool = False,
             if not quiet:
                 print(f"\n{BOLD}🌐 Production Mode Checks:{RESET}")
                 for f in prod_findings:
+                    print(f"  {YELLOW}⚠ [WARN]{RESET}  {f}")
+
+    # Project-level filesystem checks (build output size, robots.txt).
+    # Both are cheap stat/read passes and are never cached, so they always
+    # reflect the current state of the build output on disk.
+    project_findings = []
+    project_findings.extend(_check_oversized_bundles(target_dir, config))
+    project_findings.extend(_check_robots_txt(target_dir, config))
+    if project_findings:
+        total_errors += sum(1 for f in project_findings if f.severity == 'error')
+        total_warnings += sum(1 for f in project_findings if f.severity != 'error')
+        if json_mode:
+            all_findings.extend(f.to_dict() for f in project_findings)
+        if not quiet:
+            print(f"\n{BOLD}📦 Project Checks:{RESET}")
+            for f in project_findings:
+                if f.severity == 'error':
+                    print(f"  {RED}✖ [ERROR]{RESET} {f}")
+                else:
                     print(f"  {YELLOW}⚠ [WARN]{RESET}  {f}")
 
     # Project-level webhook signature verification check.

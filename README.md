@@ -46,18 +46,19 @@ cd vibe-check
 
 **Requirements:** Python 3.9+. Nothing else.
 
-## What It Checks (50 automated rules)
+## What It Checks (55 automated rules)
 
 vibe-check is built against the **50 Anti-Slop Rules**, a numbered standard for AI-generated web
-work. Not every rule in that standard is mechanically detectable, so the tool automates the 50
-concrete checks below and leaves [16 judgement-call rules](#specified-but-not-automated) to human
+work. Not every rule in that standard is mechanically detectable, so the tool automates the 55
+concrete checks below and leaves [11 judgement-call rules](#specified-but-not-automated) to human
 or agent review. Spec rule numbers are given as **(Rule N)** where a check maps onto the standard;
 checks without one are vibe-check extensions that go beyond it.
 
 Each bullet is a distinct `rule` id you'll see in `--json` output (shown in backticks). Rules
 marked **(prod)** only fire with `--prod`. To list the ids straight from the source:
-`grep -oE "Finding\('[a-z-]+'" vibe-check | sort -u` , note that returns 51, because
-`html-parse-error` is an internal diagnostic rather than a slop rule.
+`grep -oE "Finding\('[a-z0-9-]+'" vibe-check | sort -u` , note that returns 56, because
+`html-parse-error` is an internal diagnostic rather than a slop rule. (The character class needs
+the `0-9` or it silently drops `missing-h1` and `multiple-h1`.)
 
 ### Domain & Branding
 - `vercel-urls` **(Rule 1)** , hardcoded `vercel.app` URL in source
@@ -76,6 +77,8 @@ marked **(prod)** only fire with `--prod`. To list the ids straight from the sou
 - `unstyled-selects` , `<select>` elements in JSX/TSX with no `className`
 - `inline-styles` , inline `style={{...}}` objects (use Tailwind/CSS modules)
 - `missing-input-autocomplete` , `<input type="password">` missing an `autocomplete` attribute
+- `generic-gradient-palette` **(Rule 5)** , the default AI indigo/violet/purple gradient (`#6366f1`/`#8b5cf6`/`#a855f7`, or `bg-gradient-to-r from-indigo-500 to-purple-600`)
+- `gradient-hero-text` **(Rule 7)** , gradient-filled headline text (`bg-clip-text` + `text-transparent` + a gradient, or the `-webkit-background-clip: text` CSS equivalent)
 
 ### SEO & Accessibility
 - `missing-meta-desc` **(Rule 30)** , missing `<meta name="description">` tag
@@ -93,6 +96,8 @@ marked **(prod)** only fire with `--prod`. To list the ids straight from the sou
 - `missing-privacy-policy` **(Rule 18, prod)** , no Privacy Policy file/route found
 - `missing-terms` **(Rule 19, prod)** , no Terms & Conditions file/route found
 - `broken-buttons` **(Rule 20)** , interactive elements with a dead `href="#"` target
+- `json-ld-missing` **(Rule 33, prod)** , no `<script type="application/ld+json">` structured data. Only fires on pages that are already SEO surfaces (they carry a description, `og:` tags or a canonical), so app shells and extension popups are left alone
+- `robots-blocks-crawlers` **(Rule 28)** , `robots.txt` disallows `/` for `*`, Googlebot or Bingbot, de-indexing the whole site. Blocking only AI crawlers (GPTBot, CCBot, ...) is treated as deliberate and never flagged on its own
 
 ### Technical & Code Quality
 - `console-log` **(Rule 25)** , `console.log()` calls left in `.tsx` files
@@ -101,6 +106,7 @@ marked **(prod)** only fire with `--prod`. To list the ids straight from the sou
 - `target-blank-noopener` , `target="_blank"` without `rel="noopener noreferrer"`
 - `as-type-casts` , `as` type casts in TypeScript (prefer type narrowing)
 - `tech-debt-markers` , TODO/FIXME/HACK comments
+- `oversized-bundle` **(Rule 27)** , a shipped `.js`/`.mjs`/`.cjs` chunk over 500KB in `dist`/`build`/`out`/`public`. Reads the build output that is already on disk, so it needs no build step of its own
 
 ### Security
 - `xss-sinks` **(Rule 40)** , `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, `eval()`, `v-html`, `javascript:` URLs
@@ -125,17 +131,15 @@ marked **(prod)** only fire with `--prod`. To list the ids straight from the sou
 
 ### Specified but not automated
 
-These 16 rules are part of the 50 Anti-Slop Rules standard but are **not** detected by vibe-check.
-Most need visual, semantic, or build-time judgement that a regex pass can't make honestly, and a
+These 11 rules are part of the 50 Anti-Slop Rules standard but are **not** detected by vibe-check.
+They need visual, semantic, or runtime judgement that a regex pass can't make honestly, and a
 check that fires on "is this headline a buzzword?" would be mostly false positives. They stay on
 the human/agent review checklist, and double as the roadmap for future checks:
 
 | Rule | Standard says | Why not automated (yet) |
 |------|---------------|-------------------------|
 | 2 | No text-only unbranded logos | Needs visual/asset judgement |
-| 5 | No generic purple/indigo gradients | Palette intent is contextual; naive hex matching punishes deliberate branding |
 | 6 | No AI-slop stock photos / synthetic avatars | Needs image analysis |
-| 7 | No generic gradient hero typography | Visual judgement |
 | 8 | No scroll animation bloat (Framer Motion / AOS) | "Excessive" is a threshold call, not a pattern match |
 | 11 | No single-page traps for complex apps | Requires understanding app scope |
 | 13 | No vague buzzword hero headlines | Semantic judgement, high false-positive risk |
@@ -143,13 +147,15 @@ the human/agent review checklist, and double as the roadmap for future checks:
 | 17 | No fake metric counter bars | Needs semantic reading of the component |
 | 21 | No empty View Source (SSR/fallback) | Requires rendering the page |
 | 22 | No missing 404 page | Router-dependent, varies per framework |
-| 27 | No massive unoptimized JS bundles (>500KB) | Requires a build step; vibe-check is static-only |
-| 28 | No AI-blocked `robots.txt` unless intended | Intent-dependent |
 | 31 | No identical `<title>` tags across pages | Needs cross-page correlation (planned, feasible) |
-| 33 | No missing JSON-LD structured data | Feasible, simply not implemented yet |
 | 39 | No unhandled hydration / client-side errors | Requires running the app |
 
-Rules 31 and 33 are the two genuinely mechanical gaps and the best candidates to implement next.
+Rule 31 is the last genuinely mechanical gap and the best candidate to implement next. Rules 5, 7,
+27, 28 and 33 used to sit in this table; each turned out to have a mechanical core worth checking
+even though the full rule needs judgement, so they now ship as the five rules marked
+`generic-gradient-palette`, `gradient-hero-text`, `oversized-bundle`, `robots-blocks-crawlers` and
+`json-ld-missing` above. All five default to `warn`, and each is deliberately narrow: they fire on
+the unambiguous case and stay quiet on the contextual one.
 
 ## Output
 
