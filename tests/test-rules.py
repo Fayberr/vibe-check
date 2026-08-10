@@ -83,6 +83,42 @@ SELECT * FROM users; -- another comment -- here
     finally:
         shutil.rmtree(tmp_dir)
 
+
+def test_test_files_exempt_from_prose_rules():
+    """Test/fixture files must be exempt regardless of how the path is written.
+
+    Regression: _is_test_path() used to substring-match '/tests/', so the same
+    file was exempt when scanned by absolute path but flagged when scanned via
+    a relative path. Prose rules also have to stay off test files, because a
+    test asserting this rule's behaviour must contain the offending pattern.
+    """
+    tmp_dir = Path(tempfile.mkdtemp(prefix="vibe_test_exempt_"))
+    try:
+        tests_dir = tmp_dir / "tests"
+        tests_dir.mkdir()
+        fixture = tests_dir / "fixture_check.py"
+        fixture.write_text(
+            'BAD = "this is prose -- with a double dash"\n'
+            'WORSE = "this one has an em dash — right here"\n')
+
+        for extra in ([], ["--no-cache"]):
+            code, out = run_vibe_check(tmp_dir, extra)
+            for rule in ("double-dash", "em-dashes"):
+                assert len(_findings_for(out, rule)) == 0, \
+                    f"{rule} fired inside tests/ (args={extra}): {out}"
+
+        # The same content outside a test dir must still be caught, so this is
+        # an exemption and not a hole.
+        real = tmp_dir / "copy.py"
+        real.write_text('BAD = "this is prose -- with a double dash"\n')
+        code, out = run_vibe_check(tmp_dir, ["--no-cache"])
+        assert len(_findings_for(out, "double-dash")) == 1, \
+            f"double-dash should still fire outside tests/: {out}"
+        print("  PASS  test dirs exempt from prose rules, non-test files still checked")
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
 def test_supabase_service_role_key_exposed():
     tmp_dir = Path(tempfile.mkdtemp(prefix="vibe_test_service_role_"))
     try:
@@ -295,6 +331,7 @@ if __name__ == "__main__":
     test_rls_permissive_policy()
     test_rls_disabled()
     test_sql_double_dash_ignored()
+    test_test_files_exempt_from_prose_rules()
     test_supabase_service_role_key_exposed()
     test_supabase_anon_key_allowed()
     print("\nTesting Tier 1 automated standard rules...")

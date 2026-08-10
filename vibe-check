@@ -506,13 +506,27 @@ def _is_comment(content, pos):
     return prefix.startswith(('//', '#', '*', '<!--'))
 
 
+_TEST_DIR_NAMES = frozenset((
+    'test', 'tests', '__tests__', '__mocks__', 'mock', 'mocks',
+    'fixture', 'fixtures',
+))
+
+
 def _is_test_path(file_path):
-    """True if the file path indicates test/mock/fixture code."""
-    fp_lower = str(file_path).lower()
-    return any(t in fp_lower for t in (
-        '/test/', '/tests/', '__tests__', '__mocks__',
-        '/mock/', '/fixture/', '.test.', '.spec.',
-    ))
+    """True if the file path indicates test/mock/fixture code.
+
+    Matched on path *components*, not raw substrings. The previous version
+    looked for '/tests/' in the string, so it depended on how the scan was
+    invoked: an absolute path was exempt but the relative 'tests/foo.py' was
+    not, and the same file got different verdicts from `vibe-check .` and
+    `vibe-check /abs/path/tests/foo.py`.
+    """
+    parts = [p.lower() for p in Path(file_path).parts]
+    if not parts:
+        return False
+    if any(p in _TEST_DIR_NAMES for p in parts[:-1]):
+        return True
+    return '.test.' in parts[-1] or '.spec.' in parts[-1]
 
 
 def _strip_comments(content):
@@ -657,7 +671,11 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
     # "like this -- it means" but NOT "--fix", "i--", "<!--", "-->", "----"
     # Skipped for .sql: "--" is SQL's native line-comment syntax, so this
     # would false-positive on virtually every commented migration file.
-    dd_matches = list(re.finditer(r'\w\s+--\s+\w', content)) if file_path.suffix != '.sql' else []
+    # Also skipped for test files, matching Check 1: a test that asserts this
+    # rule's behaviour has to contain the pattern it is asserting about, and
+    # --fix would otherwise rewrite the fixture and break the test.
+    dd_matches = (list(re.finditer(r'\w\s+--\s+\w', content))
+                  if file_path.suffix != '.sql' and not is_test_file else [])
     if dd_matches:
         # Filter out false positives: HTML comments, CLI flags, decrement
         real = []
