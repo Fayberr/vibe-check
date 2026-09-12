@@ -38,7 +38,7 @@ EMOJI_PATTERN = re.compile(
 
 EXCLUDE_DIRS = {
     "node_modules", ".git", ".next", ".vite", "dist", "build",
-    "venv", ".venv", "__pycache__", ".cargo", "target"
+    "venv", ".venv", "__pycache__", ".cargo", "target", "android", "ios"
 }
 
 TEXT_EXTENSIONS = {
