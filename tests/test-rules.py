@@ -326,6 +326,34 @@ def test_new_rules_are_suppressible():
         shutil.rmtree(tmp_dir)
 
 
+def test_html_fragments_skip_page_rules():
+    """A partial (no doctype, no html/head/body) is not a page: no h1/lang/favicon/title
+    findings for it, but content rules such as alt text and emoji still apply."""
+    tmp_dir = Path(tempfile.mkdtemp(prefix="vibe_test_fragment_"))
+    try:
+        (tmp_dir / "partials").mkdir()
+        (tmp_dir / "partials" / "header.html").write_text(
+            '<header><a href="/">Brand</a><nav><a href="/docs">Docs</a></nav></header>\n')
+        (tmp_dir / "partials" / "card.html").write_text(
+            '<div class="card"><img src="a.png"><p>Launch \U0001F680</p></div>\n')
+        (tmp_dir / "page.html").write_text(
+            '<!doctype html><html><head><title>A page title that is much too long to fit</title></head>'
+            '<body><p>No heading here</p></body></html>\n')
+        code, out = run_vibe_check(tmp_dir, ["--no-cache"])
+        by_file = {}
+        for f in out.get("findings", []):
+            by_file.setdefault(Path(f.get("file", "")).name, set()).add(f["rule"])
+        page_rules = {"missing-h1", "missing-lang", "missing-favicon", "long-title", "missing-meta-desc", "missing-og-image"}
+        assert not (by_file.get("header.html", set()) & page_rules), f"page rules fired on a fragment: {by_file}"
+        assert not (by_file.get("card.html", set()) & page_rules), f"page rules fired on a fragment: {by_file}"
+        assert {"img-no-alt-html", "emoji-in-ui"} <= by_file.get("card.html", set()), f"content rules skipped on a fragment: {by_file}"
+        assert {"missing-h1", "missing-lang", "missing-favicon", "long-title"} <= by_file.get("page.html", set()), \
+            f"page rules no longer fire on a real page: {by_file}"
+        print("  PASS  HTML fragments skip page-level rules but keep content rules")
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
 if __name__ == "__main__":
     print("Testing SQL RLS and Supabase service_role rules...")
     test_rls_permissive_policy()
@@ -341,5 +369,6 @@ if __name__ == "__main__":
     test_generic_gradient_palette()
     test_gradient_hero_text()
     test_new_rules_are_suppressible()
+    test_html_fragments_skip_page_rules()
     print("========================================================")
     print("All rule tests passed cleanly!")

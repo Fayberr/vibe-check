@@ -573,9 +573,19 @@ class SimpleHTMLInspector(HTMLParser):
         self.images_missing_alt = 0
         self.broken_hash_buttons = 0
         self.has_json_ld = False
+        # A file with no doctype and no <html>/<head>/<body> is a fragment (a partial,
+        # a component template), not a page. Page-level rules do not apply to it.
+        self.is_document = False
+
+    def handle_decl(self, decl):
+        if decl.strip().lower().startswith("doctype"):
+            self.is_document = True
 
     def handle_starttag(self, tag, attrs):
         attrs_dict = dict(attrs)
+
+        if tag in ("html", "head", "body"):
+            self.is_document = True
 
         if tag == "script":
             # Rule 33: JSON-LD structured data. Only the ld+json type counts;
@@ -1799,7 +1809,7 @@ def check_html_file(file_path: Path, is_prod: bool = False):
 
     # Title length check (rule 24: max 24 chars, ideal 12-18)
     title_stripped = parser.title.strip()
-    if len(title_stripped) > 24:
+    if parser.is_document and len(title_stripped) > 24:
         errors.append(
             Finding('long-title', "error",
                 f"Page title too long ({len(title_stripped)} chars): '{title_stripped}'. "
@@ -1807,8 +1817,8 @@ def check_html_file(file_path: Path, is_prod: bool = False):
             )
         )
 
-    # Heading hierarchy check
-    if parser.h1_count == 0:
+    # Heading hierarchy check (pages only: a header or footer partial has no <h1> by design)
+    if parser.is_document and parser.h1_count == 0:
         errors.append(Finding('missing-h1', "error", "Missing <h1> primary heading element."))
     elif parser.h1_count > 1:
         warnings.append(Finding('multiple-h1', "warn", f"Multiple <h1> elements found ({parser.h1_count}). Consider using a single <h1> per page."))
@@ -1821,7 +1831,11 @@ def check_html_file(file_path: Path, is_prod: bool = False):
     if parser.broken_hash_buttons > 0:
         errors.append(Finding('broken-buttons', "error", f"Found {parser.broken_hash_buttons} interactive button/link(s) with dead href='#' target."))
 
-    # SEO & Metadata
+    # SEO & Metadata: page-level, so skipped for fragments. The content checks
+    # above (emoji, alt text, dead links) still apply to them.
+    if not parser.is_document:
+        return errors, warnings
+
     if not parser.has_lang:
         errors.append(Finding('missing-lang', "error", "Missing 'lang' attribute on <html> element."))
 
