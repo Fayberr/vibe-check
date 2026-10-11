@@ -20,7 +20,7 @@ CYAN = "\033[96m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
 
-# Emoji detection pattern — covers all common Unicode emoji ranges
+# Emoji detection pattern: covers all common Unicode emoji ranges
 EMOJI_PATTERN = re.compile(
     "[\U0001F600-\U0001F64F"   # Emoticons
     "\U0001F300-\U0001F5FF"    # Misc Symbols & Pictographs
@@ -46,13 +46,13 @@ TEXT_EXTENSIONS = {
     ".vue", ".svelte", ".json", ".md", ".css", ".py", ".sql"
 }
 
-# Per-scan deduplication state — reset at start of each scan_directory call.
+# Per-scan deduplication state: reset at start of each scan_directory call.
 # Avoids flagging the same project-level issue (e.g. "no security headers")
 # for every route file in the same project.
 _seen_project_warnings = set()
 
 class Finding:
-    """A single vibe-check finding — one rule violation or warning.
+    """A single vibe-check finding, one rule violation or warning.
 
     Implements __str__ for backward-compatible human-readable display,
     and to_dict() for JSON serialization when --json is used.
@@ -102,7 +102,7 @@ _COMMIT_MSG_HOOK = r"""#!/bin/sh
 #
 # AI tools (Claude, GPT, Gemini, etc.) are tools, not co-authors.
 # A "Co-Authored-By: Claude" trailer is a dead giveaway of vibecoded code.
-# This hook blocks those commits before they happen — GitHub contributor
+# This hook blocks those commits before they happen: GitHub contributor
 # caching makes retroactive cleanup much harder than upfront prevention.
 #
 # Global hooks (--global): this hook chains to per-repo .git/hooks/commit-msg
@@ -424,7 +424,7 @@ def _tool_signature():
     """Hash of this script, so shipping a new or changed rule invalidates the cache.
 
     Falls back to the version string if the source is unreadable (frozen binary,
-    odd loader) — degraded but never fatal.
+    odd loader), degraded but never fatal.
     """
     global _tool_sig_cache
     if _tool_sig_cache is None:
@@ -677,7 +677,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                         "Auto-fixed em-dashes by replacing with commas.", fixable=True))
 
     # Check 1b: Double hyphens used as em-dash replacement (-- in prose)
-    # Pattern: word, space(s), --, space(s), word — the classic AI slop
+    # Pattern: word, space(s), --, space(s), word: the classic AI slop
     # "like this -- it means" but NOT "--fix", "i--", "<!--", "-->", "----"
     # Skipped for .sql: "--" is SQL's native line-comment syntax, so this
     # would false-positive on virtually every commented migration file.
@@ -718,7 +718,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
             )
 
     # Check 3: Leftover AI builder watermarks
-    # Skip .md files — documentation naturally references these by name.
+    # Skip .md files: documentation naturally references these by name.
     if not file_path.suffix == '.md':
         sev = _sev('ai-watermarks', 'error')
         if sev != 'off':
@@ -731,7 +731,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                     )
 
     # Check 4: Placeholder text & fake reviews
-    # Skip .md files — documentation naturally lists these as examples.
+    # Skip .md files: documentation naturally lists these as examples.
     if not file_path.suffix == '.md':
         sev = _sev('placeholder-copy', 'warn')
         if sev != 'off':
@@ -775,18 +775,18 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                         f"to ensure consistent theming and custom styling.")
                 )
 
-    # Check 7: dangerouslySetInnerHTML (TSX/JSX only) — ERROR.
+    # Check 7: dangerouslySetInnerHTML (TSX/JSX only): ERROR.
     if file_path.suffix in (".tsx", ".jsx"):
         if "dangerouslySetInnerHTML" in content:
             sev = _sev('dangerously-set-html', 'error')
             if sev != 'off':
                 (errors if sev == 'error' else warnings).append(
                     Finding('dangerously-set-html', sev,
-                        "Found dangerouslySetInnerHTML — an XSS vector. "
+                        "Found dangerouslySetInnerHTML, an XSS vector. "
                         "Use a safe renderer or properly sanitize content before injection.")
                 )
 
-    # Check 8: target="_blank" without rel="noopener noreferrer" (HTML/JSX/TSX) — ERROR.
+    # Check 8: target="_blank" without rel="noopener noreferrer" (HTML/JSX/TSX): ERROR.
     if file_path.suffix in (".html", ".htm", ".tsx", ".jsx"):
         blank_targets = list(re.finditer(
             r'target\s*=\s*["\']_blank["\']|target\s*=\s*\{["\']_blank["\']\}',
@@ -810,7 +810,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                         f"Add rel=\"noopener noreferrer\" to prevent tab-napping attacks.")
                 )
 
-    # Check 9: console.log in frontend code (.tsx only) — WARN.
+    # Check 9: console.log in frontend code (.tsx only): WARN.
     if file_path.suffix in (".tsx",):
         log_matches = list(re.finditer(r'\bconsole\.log\b', content))
         if log_matches:
@@ -826,7 +826,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                         f"Remove debugging logs before shipping to production.")
                 )
 
-    # Check 10: Inline style={{...}} objects (TSX/JSX only) — WARN.
+    # Check 10: Inline style={{...}} objects (TSX/JSX only): WARN.
     if file_path.suffix in (".tsx", ".jsx"):
         inline_styles = list(re.finditer(r'\bstyle\s*=\s*\{\{', content))
         if inline_styles:
@@ -842,7 +842,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                         f"Use Tailwind classes or CSS modules instead for consistent theming.")
                 )
 
-    # Check 11: <img> without alt text (JSX/TSX) — ERROR.
+    # Check 11: <img> without alt text (JSX/TSX): ERROR.
     if file_path.suffix in (".tsx", ".jsx"):
         imgs_missing_alt = 0
         missing_lines = []
@@ -865,7 +865,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                         f"Every image must have descriptive alt text for accessibility.")
                 )
 
-    # Check 12: TODO / FIXME / HACK comments — WARN.
+    # Check 12: TODO / FIXME / HACK comments: WARN.
     if file_path.suffix in TEXT_EXTENSIONS:
         markers = []
         for match in re.finditer(r'(?://|#|/\*|\*)\s*(TODO|FIXME|HACK)\b', content):
@@ -881,7 +881,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                         f"Resolve or track these before shipping.")
                 )
 
-    # Check 13: `as` type casts in TypeScript — WARN.
+    # Check 13: `as` type casts in TypeScript: WARN.
     # Often used where proper type narrowing would catch edge cases. Flag patterns
     # like `x as SomeType`, `(x as Type)`, `as string`, `as number` but NOT
     # `as const` (which is idiomatic) or common English phrases.
@@ -907,7 +907,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                     )
                 )
 
-    # Check 14: XSS sinks — ERROR.
+    # Check 14: XSS sinks: ERROR.
     # innerHTML/outerHTML assignments, insertAdjacentHTML, document.write,
     # eval(), new Function(), v-html (Vue), and javascript: protocol URLs
     # are the most common XSS vectors in vibecoded projects. Flag as ERROR
@@ -937,7 +937,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                         after = content[m.end():m.end() + 20].strip()
                         if after.startswith("''") or after.startswith('""') or after.startswith('``'):
                             continue
-                        # Skip if nearby content contains esc( — developer is escaping.
+                        # Skip if nearby content contains esc(: developer is escaping.
                         # Use a generous window (8000 chars) because long template
                         # literals can put interpolations many lines below the
                         # assignment. A shorter window (the old 300) missed safely-
@@ -945,7 +945,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                         nearby = content[m.end():m.end() + 8000]
                         if 'esc(' in nearby:
                             continue
-                        # Skip purely static template literals — no ${...} means
+                        # Skip purely static template literals: no ${...} means
                         # nothing user-controlled can leak in.
                         after_trim = content[m.end():m.end() + 50].lstrip()
                         if after_trim.startswith('`'):
@@ -973,7 +973,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                     f"use framework templating instead of v-html/javascript: URLs.")
                 )
 
-    # Check 15: File upload security gaps — WARN.
+    # Check 15: File upload security gaps: WARN.
     # Catch three common patterns: <input type="file"> without accept
     # attribute, multer/formidable without fileFilter, and express.static
     # mount points over upload directories.
@@ -1015,9 +1015,9 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                 )
             )
 
-    # Check 16: Webhook signature verification gaps — WARN.
+    # Check 16: Webhook signature verification gaps: WARN.
     # Detect files that handle webhook routes but don't contain HMAC
-    # signature verification in the same file. This is a heuristic —
+    # signature verification in the same file. This is a heuristic,
     # verification could be in a shared middleware or imported module.
     if file_path.suffix in (".js", ".ts", ".py"):
         # First: is this file a webhook handler?
@@ -1082,7 +1082,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                         f"crypto.timingSafeEqual (Node) or hmac.compare_digest (Python).")
                     )
 
-    # Check 17: Hardcoded secrets — ERROR.
+    # Check 17: Hardcoded secrets: ERROR.
     # AI assistants inline API keys, DB credentials, and access tokens from
     # tutorial patterns in training data. Apiiro data shows AI-assisted devs
     # expose cloud credentials at nearly 2x the rate of non-AI devs.
@@ -1162,7 +1162,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                     f"and rotate any exposed credentials immediately.")
                 )
 
-    # Check 18: Broken JWT validation — ERROR.
+    # Check 18: Broken JWT validation: ERROR.
     # AI assistants copy the shortest jwt.decode() call from docs, which often
     # omits algorithm pinning. Explicitly disabled verification and alg:none
     # acceptance are common.
@@ -1267,7 +1267,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                     f"Use jwt.verify() (not jwt.decode()) and pin algorithm allowlists.")
                 )
 
-    # Check 19: Debug mode enabled — WARN.
+    # Check 19: Debug mode enabled: WARN.
     # AI generates config with DEBUG=True from templates, never changes it before
     # deploy. Django debug console, Flask debugger, and Express stack traces all
     # leak secrets and sometimes allow code execution.
@@ -1322,12 +1322,12 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                         f"Found {len(debug_found)} debug-mode indicator(s): "
                         f"{', '.join(debug_found[:8])}"
                         f"{'...' if len(debug_found) > 8 else ''}. "
-                        f"Disable debug mode in production — debug consoles expose "
+                        f"Disable debug mode in production, debug consoles expose "
                         f"interactive code execution and stack traces with secrets."
                     )
                 )
 
-    # Check 20: Unsafe deserialization — ERROR.
+    # Check 20: Unsafe deserialization: ERROR.
     # pickle.loads(), yaml.load() without SafeLoader, and similar functions
     # execute arbitrary code on untrusted input. AI reproduces the shortest
     # call signature from docs, which is the unsafe one.
@@ -1383,7 +1383,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                     f"execution. pickle.loads() on untrusted input is remote code execution.")
                 )
 
-    # Check 21: Math.random() in security-sensitive contexts — WARN.
+    # Check 21: Math.random() in security-sensitive contexts: WARN.
     # Math.random() is not cryptographically secure. AI assistants frequently
     # reach for it when generating tokens, reset codes, or session IDs because
     # pre-crypto-API patterns dominate training data.
@@ -1446,7 +1446,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                         )
                     )
 
-    # Check 22: Missing security headers — WARN.
+    # Check 22: Missing security headers: WARN.
     # AI generates route handlers and page templates but omits security headers
     # like CSP, HSTS, X-Frame-Options. In one study, zero of five AI-built apps
     # had any security headers configured.
@@ -1486,7 +1486,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                             )
                         )
 
-    # Check 23: Potential SSRF via unfiltered user URLs — WARN.
+    # Check 23: Potential SSRF via unfiltered user URLs: WARN.
     # URL preview, webhook registration, and image import features often pass
     # user-supplied URLs directly to fetch/axios/requests. AI tools rarely add
     # URL validation or hostname allowlists unless explicitly prompted.
@@ -1551,7 +1551,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                     )
                 )
 
-    # Check 24: No rate limiting configured — WARN.
+    # Check 24: No rate limiting configured: WARN.
     # Resource exhaustion was the #1 flaw in Xint.io's 434-flaw audit (93 issues).
     # AI codes happy-path handlers; rate limiting is infrastructure it never adds
     # unless explicitly prompted.
@@ -1588,7 +1588,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                             )
                         )
 
-    # Check 25: Password inputs missing autocomplete — WARN.
+    # Check 25: Password inputs missing autocomplete: WARN.
     # Password managers rely on autocomplete attributes to fill, generate,
     # and update credentials. Without them, users are pushed toward weak
     # or reused passwords, and saved credentials can't be updated after a
@@ -1617,7 +1617,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                 )
 
     # Check 26: Permissive or disabled Supabase/Postgres row-level security
-    # policies in SQL migrations — ERROR. "Vibe-coded" Supabase apps commonly
+    # policies in SQL migrations: ERROR. "Vibe-coded" Supabase apps commonly
     # ship a policy like `USING (true)` (meant as a placeholder to "get it
     # working") that grants every row to every anon-key holder, or an explicit
     # DISABLE ROW LEVEL SECURITY left in from local debugging. This is a
@@ -1655,7 +1655,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                         f"unless the table is genuinely meant to be fully public.")
                 )
 
-    # Check 27: Supabase service_role key hardcoded in source — ERROR.
+    # Check 27: Supabase service_role key hardcoded in source: ERROR.
     # The service_role JWT bypasses row-level security entirely. It is meant
     # to stay server-side only (env var / secrets manager); pasting it into
     # frontend code or committing it exposes full unrestricted DB access to
@@ -1687,7 +1687,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                     )
                     break  # one finding per file is enough signal
 
-    # Check 28: Generic purple/indigo gradient palette — WARN.
+    # Check 28: Generic purple/indigo gradient palette: WARN.
     # The default "AI startup landing page" palette. Deliberately narrow: only
     # the three exact hexes named in the standard (Tailwind indigo-500,
     # violet-500, purple-500) and only inside an actual gradient, or the
@@ -1739,7 +1739,7 @@ def check_file_content(file_path: Path, fix: bool = False, config: dict = None):
                         f"Use colours from your own brand system instead.")
                 )
 
-    # Check 29: Generic gradient hero typography — WARN.
+    # Check 29: Generic gradient hero typography: WARN.
     # `bg-clip-text` + `text-transparent` over a gradient (or the raw CSS
     # equivalent) is *the* gradient-text idiom, so matching it is precise
     # rather than a guess. Flagged as taste, not correctness: it is the single
@@ -1796,7 +1796,7 @@ def check_html_file(file_path: Path, is_prod: bool = False):
     if "vite + react" in parser.title.lower():
         errors.append(Finding('default-title', "error", f"Default framework page title detected: '{parser.title.strip()}'"))
 
-    # Emoji check — strip script/style/svg blocks to avoid false positives in data URIs
+    # Emoji check: strip script/style/svg blocks to avoid false positives in data URIs
     text_only = re.sub(r"<(script|style|svg)\b[^>]*>.*?</\1>", "", content, flags=re.DOTALL | re.IGNORECASE)
     text_only = re.sub(r"<[^>]+>", "", text_only)  # Strip all remaining HTML tags
     emoji_matches = EMOJI_PATTERN.findall(text_only)
@@ -1911,7 +1911,7 @@ def scan_directory(target_dir: Path, is_prod: bool = False, fix: bool = False,
             print(f"  {RED}✖ [ERROR]{RESET} {f}" if f.severity == 'error' else f"  {YELLOW}⚠ [WARN]{RESET}  {f}")
 
     # ── Cache ──────────────────────────────────────────────────────────────────
-    # Holds findings, not just "was scanned" — see the _load_findings_cache notes.
+    # Holds findings, not just "was scanned": see the _load_findings_cache notes.
     _remove_legacy_cache(target_dir)
     cache = _load_findings_cache(target_dir, config, is_prod) if use_cache else {}
     # Seeded from the old cache so a partial run (--changed) does not discard
@@ -1934,9 +1934,9 @@ def scan_directory(target_dir: Path, is_prod: bool = False, fix: bool = False,
                         changed_file_set.add(str(p))
                 if not quiet: print(f"  {CYAN}git-aware:{RESET} {len(changed_file_set)} changed file(s) detected")
             else:
-                if not quiet: print(f"  {YELLOW}git-aware:{RESET} no changes or not a repo — falling back to full scan")
+                if not quiet: print(f"  {YELLOW}git-aware:{RESET} no changes or not a repo, falling back to full scan")
         except Exception:
-            if not quiet: print(f"  {YELLOW}git-aware:{RESET} git not available — falling back to full scan")
+            if not quiet: print(f"  {YELLOW}git-aware:{RESET} git not available, falling back to full scan")
 
     # ── File walking ───────────────────────────────────────────────────────────
     has_privacy = False
@@ -1980,7 +1980,7 @@ def scan_directory(target_dir: Path, is_prod: bool = False, fix: bool = False,
                 continue
 
             # Cache check: replay findings for files whose hash hasn't changed.
-            # Note this REPLAYS rather than skips — a cached file still reports
+            # Note this REPLAYS rather than skips: a cached file still reports
             # its errors, so the verdict is the same with and without the cache.
             file_hash = None
             entry = None
@@ -2157,7 +2157,7 @@ def scan_directory(target_dir: Path, is_prod: bool = False, fix: bool = False,
                     print(f"         Commits include patterns like: {ai_matches[0].strip()}")
                     print(f"         Run {BOLD}vibe-check --setup{RESET} to prevent future occurrences and {BOLD}scrub-ai-contributors{RESET} to clean existing history.")
     except Exception:
-        pass  # Not a git repo or git unavailable — skip
+        pass  # Not a git repo or git unavailable, skip
 
     # ── Missing-hook warning ────────────────────────────────────────────────
     # If this is a git repo but no commit-msg hook is installed (per-repo or
@@ -2281,10 +2281,10 @@ def install_hooks(target_dir, global_hooks=False, server_mode=False):
     if hook_path.exists():
         existing = hook_path.read_text(encoding="utf-8", errors="replace")
         if "Installed by vibe-check" in existing:
-            # Our hook already — overwrite to update
+            # Our hook already: overwrite to update
             pass
         else:
-            # Someone else's hook — back it up
+            # Someone else's hook: back it up
             backup = Path(str(hook_path) + ".bak")
             backup.write_text(existing, encoding="utf-8")
             print(f"  {YELLOW}⚠{RESET}  Existing commit-msg hook backed up to {backup.name}")
@@ -2319,7 +2319,7 @@ def _check_attribution_settings(fix=False):
     """
     settings_path = Path.home() / ".claude" / "settings.json"
     if not settings_path.is_file():
-        return []  # Claude Code not installed — nothing to check
+        return []  # Claude Code not installed, nothing to check
 
     try:
         raw = settings_path.read_text(encoding="utf-8")
@@ -2346,7 +2346,7 @@ def _check_attribution_settings(fix=False):
         issues.append(f"pr={pr_val!r}")
 
     if not issues:
-        return []  # Both already set to empty string — clean
+        return []  # Both already set to empty string, clean
 
     if fix:
         if "attribution" not in settings:
@@ -2432,7 +2432,7 @@ def _check_pre_receive_hooks(target_dir):
         return {"status": "not_applicable", "detail": "Cannot scan for bare repos (permission error)"}
 
     # Filter to actual bare repos: must have HEAD + objects + refs at top level,
-    # and core.bare must be true (or absent in ancient repos — the structure check is enough).
+    # and core.bare must be true (or absent in ancient repos: the structure check is enough).
     bare_repos = []
     for c in candidates:
         if not c.is_dir():
@@ -2540,7 +2540,7 @@ def run_setup(target_dir, json_mode=False):
     print(f"  {'─' * 52}\n")
 
     icon_map = {"ok": "✓", "installed": "✓", "needs_fix": "⚠", "not_installed": "⚠",
-                "not_applicable": "—", "error": "✖", "no_git": "—"}
+                "not_applicable": "-", "error": "✖", "no_git": "-"}
     color_map = {"ok": GREEN, "installed": GREEN, "needs_fix": YELLOW, "not_installed": YELLOW,
                  "not_applicable": "", "error": RED, "no_git": ""}
 
